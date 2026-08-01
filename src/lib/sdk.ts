@@ -238,6 +238,20 @@ export class Aegis {
     return this.request(`/api/approvals/${encodeURIComponent(id)}/reject`, { method: "POST" });
   }
 
+  // ---- organizations --------------------------------------------------------
+
+  listOrgs(): Promise<AegisResponse> {
+    return this.request("/api/orgs");
+  }
+
+  createOrg(name: string): Promise<AegisResponse> {
+    return this.request("/api/orgs", { method: "POST", body: { name } });
+  }
+
+  getOrg(id: string): Promise<AegisResponse> {
+    return this.request(`/api/orgs/${encodeURIComponent(id)}`);
+  }
+
   // ---- internals ------------------------------------------------------------
 
   private sign(message: string): string {

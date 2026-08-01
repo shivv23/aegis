@@ -16,6 +16,14 @@ export interface Wallet {
   balance: number;
   policy: WalletPolicy;
   createdAt: number;
+  /** Multi-tenant: owning organization, when scoped. */
+  orgId?: string;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  createdAt: number;
 }
 
 export type TxStatus =
@@ -77,6 +85,8 @@ export interface ScopedKeyClaims {
   role: string;
   /** Optional signer identity for multi-sig owner key issuance. */
   keyId?: string;
+  /** Optional org scope: this key can only manage wallets in this org. */
+  orgId?: string;
 }
 
 export interface TransferRequest {

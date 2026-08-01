@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import { authenticate, authorize, error, json } from "@/core/api";
+import { authenticate, authorize, authorizeWalletOrg, error, json } from "@/core/api";
 import { addAudit, getPendingPolicy, getWallet, listAudit, listPolicyVersions, listTransactions, settleDue, updatePolicy } from "@/core/store";
 
 export const runtime = "nodejs";
@@ -17,6 +17,8 @@ export async function GET(
   await settleDue();
   const wallet = await getWallet(id);
   if (!wallet) return error("Wallet not found", 404);
+  const orgz = authorizeWalletOrg(claims, wallet.orgId);
+  if (!orgz.ok) return error(orgz.reason!, 403);
 
   const [transactions, audit, pendingPolicy, policyVersions] = await Promise.all([
     listTransactions(id),
@@ -46,6 +48,11 @@ export async function PATCH(
 
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return error("Invalid policy patch", 400);
+
+  const existing = await getWallet(id);
+  if (!existing) return error("Wallet not found", 404);
+  const orgz = authorizeWalletOrg(claims, existing.orgId);
+  if (!orgz.ok) return error(orgz.reason!, 403);
 
   const result = await updatePolicy(id, parsed.data, claims!.walletId);
   if (!result) return error("Wallet not found", 404);

@@ -46,3 +46,37 @@ export function authorize(
   }
   return { ok: true };
 }
+
+/**
+ * Authorizes an owner key against an organization. The master key ("*", no
+ * org) may manage any org; an org-scoped owner key may only manage wallets
+ * inside its own org.
+ */
+export function authorizeOrg(
+  claims: ScopedKeyClaims | null,
+  orgId: string,
+): { ok: boolean; reason?: string } {
+  if (!claims) {
+    return { ok: false, reason: "Missing or invalid credentials" };
+  }
+  if (claims.scope !== "owner") {
+    return { ok: false, reason: `Key has scope '${claims.scope}', requires 'owner'` };
+  }
+  if (claims.orgId && claims.orgId !== orgId) {
+    return { ok: false, reason: "Key is not authorized for this org" };
+  }
+  return { ok: true };
+}
+
+/**
+ * An org-scoped owner key may only touch wallets that belong to its org.
+ */
+export function authorizeWalletOrg(
+  claims: ScopedKeyClaims | null,
+  walletOrgId: string | undefined,
+): { ok: boolean; reason?: string } {
+  if (claims?.orgId && claims.orgId !== walletOrgId) {
+    return { ok: false, reason: "Key is not authorized for this wallet's org" };
+  }
+  return { ok: true };
+}

@@ -7,12 +7,13 @@ const secret = new TextEncoder().encode(
 
 export const MASTER_WALLET_ID = "*";
 
-export function signKey(walletId: string, scope: Scope, keyId?: string): Promise<string> {
+export function signKey(walletId: string, scope: Scope, keyId?: string, orgId?: string): Promise<string> {
   const claims: ScopedKeyClaims = {
     walletId,
     scope,
     role: scope === "owner" ? "wallet-owner" : "agent",
     ...(keyId ? { keyId } : {}),
+    ...(orgId ? { orgId } : {}),
   };
   return new SignJWT({ ...claims })
     .setProtectedHeader({ alg: "HS256" })
@@ -39,6 +40,7 @@ export async function verifyKey(
         scope: payload.scope,
         role: payload.role as string,
         ...(typeof payload.keyId === "string" ? { keyId: payload.keyId } : {}),
+        ...(typeof payload.orgId === "string" ? { orgId: payload.orgId } : {}),
       };
     }
     return null;

@@ -7,6 +7,7 @@ import type {
   Approval,
   AuditLogEntry,
   AgentKeyRecord,
+  Organization,
   OutboxEntry,
   PolicyVersion,
   PolicyVersionStatus,
@@ -23,7 +24,7 @@ import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
 import { getRail } from "./rails";
 import { signKey } from "./keys";
-import { SEED_VENDORS, SEED_WALLET_ID } from "./seed";
+import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
 
@@ -215,6 +216,13 @@ async function init(client: Db): Promise<void> {
       key_minted INTEGER NOT NULL
     )
   `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS orgs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    )
+  `);
 
   // v1 → v2 migration: old tables lack the hash-chain columns.
   const migrated: Array<"transactions" | "audit"> = [];
@@ -230,6 +238,9 @@ async function init(client: Db): Promise<void> {
   }
   if (!(await hasColumn(client, "transactions", "external_ref"))) {
     await client.execute("ALTER TABLE transactions ADD COLUMN external_ref TEXT");
+  }
+  if (!(await hasColumn(client, "wallets", "org_id"))) {
+    await client.execute("ALTER TABLE wallets ADD COLUMN org_id TEXT");
   }
   if (!(await hasColumn(client, "audit", "seq"))) {
     await client.execute("ALTER TABLE audit ADD COLUMN seq INTEGER");
@@ -266,8 +277,14 @@ async function runSeed(client: Db): Promise<void> {
   };
 
   await client.execute(
-    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO orgs (id, name, created_at)
+     VALUES (?, ?, ?)`,
+    [SEED_ORG_ID, "Acme Labs", now - 30 * dayMs],
+  );
+
+  await client.execute(
+    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at, org_id)
+     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       SEED_WALLET_ID,
       "TradingBot-42",
@@ -279,6 +296,7 @@ async function runSeed(client: Db): Promise<void> {
       policy.velocityLimitPerMin,
       JSON.stringify(policy.allowlist),
       now - 30 * dayMs,
+      SEED_ORG_ID,
     ],
   );
 
@@ -474,6 +492,7 @@ function rowToWallet(row: Record<string, unknown>): Wallet {
       allowlist: JSON.parse(row.allowlist as string) as string[],
     },
     createdAt: Number(row.created_at),
+    orgId: row.org_id ? (row.org_id as string) : undefined,
   };
 }
 
@@ -535,12 +554,13 @@ export async function createWallet(input: {
   ownerDid: string;
   balance: number;
   policy: WalletPolicy;
+  orgId?: string;
 }): Promise<Wallet> {
   const s = getStore();
   await s.ready;
   await s.client.execute(
-    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at, org_id)
+     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.id,
       input.name,
@@ -552,6 +572,7 @@ export async function createWallet(input: {
       input.policy.velocityLimitPerMin,
       JSON.stringify(input.policy.allowlist),
       Date.now(),
+      input.orgId ?? null,
     ],
   );
   const wallet = await getWallet(input.id);
@@ -559,6 +580,57 @@ export async function createWallet(input: {
   await createPolicyVersion(input.id, input.policy, "owner");
   s.events.emit("wallet", wallet);
   return wallet;
+}
+
+export async function createOrg(name: string): Promise<Organization> {
+  const s = getStore();
+  await s.ready;
+  const org: Organization = {
+    id: `org-${randomUUID().slice(0, 8)}`,
+    name,
+    createdAt: Date.now(),
+  };
+  await s.client.execute("INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?)", [
+    org.id,
+    org.name,
+    org.createdAt,
+  ]);
+  return org;
+}
+
+export async function listOrgs(): Promise<Organization[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM orgs ORDER BY created_at ASC");
+  return rows.map((r) => ({
+    id: r.id as string,
+    name: r.name as string,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export async function getOrg(id: string): Promise<Organization | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM orgs WHERE id = ?", [id]);
+  const row = rows[0];
+  return row
+    ? {
+        id: row.id as string,
+        name: row.name as string,
+        createdAt: Number(row.created_at),
+      }
+    : null;
+}
+
+export async function listOrgWallets(orgId: string): Promise<Wallet[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM wallets WHERE org_id = ? ORDER BY created_at ASC",
+    [orgId],
+  );
+  return rows.map((r) => rowToWallet(r as Record<string, unknown>));
 }
 
 export async function createPolicyVersion(

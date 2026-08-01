@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
-import { authenticate, authorize, error, json } from "@/core/api";
-import { addAudit, setWalletStatus } from "@/core/store";
+import { authenticate, authorize, authorizeWalletOrg, error, json } from "@/core/api";
+import { addAudit, getWallet, setWalletStatus } from "@/core/store";
 
 export const runtime = "nodejs";
 
@@ -13,6 +13,11 @@ async function handle(
   const claims = await authenticate(req);
   const authz = authorize(claims, "owner");
   if (!authz.ok) return error(authz.reason!, 401);
+
+  const existing = await getWallet(id);
+  if (!existing) return error("Wallet not found", 404);
+  const orgz = authorizeWalletOrg(claims, existing.orgId);
+  if (!orgz.ok) return error(orgz.reason!, 403);
 
   const wallet = await setWalletStatus(id, freeze ? "FROZEN" : "ACTIVE");
   if (!wallet) return error("Wallet not found", 404);
