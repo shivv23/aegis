@@ -46,6 +46,12 @@ next-env.d.ts
 
 # internal planning docs (never pushed)
 /plan.md
+/SESSION.md
+
+# python sdk
+__pycache__/
+*.pyc
+python/*.egg-info/
 
 # hardhat / solidity build artifacts (contracts package)
 /contracts/artifacts/
