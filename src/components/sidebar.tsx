@@ -18,6 +18,7 @@ import {
   Webhook,
   KeyRound,
   Home,
+  Receipt,
 } from "lucide-react";
 
 const links = [
@@ -33,6 +34,7 @@ const links = [
   { href: "/docs", label: "API Docs", icon: BookOpen },
   { href: "/whitepaper", label: "Whitepaper", icon: FileText },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/billing", label: "Billing", icon: Receipt },
 ];
 
 export function Sidebar() {

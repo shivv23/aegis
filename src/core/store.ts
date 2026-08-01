@@ -34,6 +34,7 @@ import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verify
 import { unitsFromFloat } from "./money";
 import { decryptSecret, encryptSecret, secretsEnabled } from "./secrets";
 import { getRail } from "./rails";
+import { computeFee } from "./usage";
 import { signKey } from "./keys";
 import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
@@ -500,6 +501,38 @@ const MIGRATIONS: Migration[] = [
           matched INTEGER NOT NULL,
           breaks INTEGER NOT NULL,
           details TEXT NOT NULL
+        )
+      `);
+    },
+  },
+  {
+    // Fee schedule + metering billing (A6): usage rows carry a rail fee and
+    // invoice lines aggregate usage into per-wallet invoices.
+    version: 10,
+    name: "fee-billing",
+    up: async (client) => {
+      if (!(await hasColumn(client, "usage", "fee"))) {
+        await client.execute("ALTER TABLE usage ADD COLUMN fee REAL NOT NULL DEFAULT 0");
+      }
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS invoices (
+          id TEXT PRIMARY KEY,
+          wallet_id TEXT NOT NULL,
+          period_start BIGINT NOT NULL,
+          period_end BIGINT NOT NULL,
+          status TEXT NOT NULL,
+          total_usd REAL NOT NULL,
+          total_fee_usd REAL NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS invoice_lines (
+          invoice_id TEXT NOT NULL,
+          rail TEXT NOT NULL,
+          amount_usd REAL NOT NULL,
+          fee_usd REAL NOT NULL,
+          PRIMARY KEY (invoice_id, rail)
         )
       `);
     },
@@ -1259,21 +1292,24 @@ export async function recordUsage(input: {
   txId: string;
   amount: number;
   rail: string;
+  fee?: number;
 }): Promise<UsageRecord> {
   const s = getStore();
   await s.ready;
+  const fee = input.fee ?? computeFee(input.rail, input.amount);
   const record: UsageRecord = {
     id: randomUUID(),
     walletId: input.walletId,
     orgId: input.orgId,
     txId: input.txId,
     amount: input.amount,
+    fee,
     rail: input.rail,
     createdAt: Date.now(),
   };
   await s.client.execute(
-    "INSERT INTO usage (id, wallet_id, org_id, tx_id, amount, rail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [record.id, record.walletId, record.orgId ?? null, record.txId, record.amount, record.rail, record.createdAt],
+    "INSERT INTO usage (id, wallet_id, org_id, tx_id, amount, fee, rail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [record.id, record.walletId, record.orgId ?? null, record.txId, record.amount, record.fee, record.rail, record.createdAt],
   );
   return record;
 }
@@ -1290,6 +1326,7 @@ export async function listUsage(walletId?: string): Promise<UsageRecord[]> {
     orgId: r.org_id ? (r.org_id as string) : undefined,
     txId: r.tx_id as string,
     amount: Number(r.amount),
+    fee: Number(r.fee ?? 0),
     rail: r.rail as string,
     createdAt: Number(r.created_at),
   }));
@@ -1766,6 +1803,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
           txId: tx.id,
           amount: tx.amount,
           rail: rail.id,
+          fee: computeFee(rail.id, tx.amount),
         });
         await recordCounterpartyPayment(tx.to, tx.amount);
         await addAudit({

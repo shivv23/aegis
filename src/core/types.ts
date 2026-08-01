@@ -84,8 +84,27 @@ export interface UsageRecord {
   orgId?: string;
   txId: string;
   amount: number;
+  fee: number;
   rail: string;
   createdAt: number;
+}
+
+export interface InvoiceLine {
+  rail: string;
+  amountUsd: number;
+  feeUsd: number;
+}
+
+export interface Invoice {
+  id: string;
+  walletId: string;
+  periodStart: number;
+  periodEnd: number;
+  status: "draft" | "finalized";
+  totalUsd: number;
+  totalFeeUsd: number;
+  createdAt: number;
+  lines: InvoiceLine[];
 }
 
 export interface KeyAcl {
