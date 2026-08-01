@@ -50,6 +50,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Risk engine** | Rail | pre-tx score 0–100 (amount vs cap/budget, new payee, velocity burst, red-flag purpose, hour) |
 | **Step-up approval** | Wallet | risk score ≥ 55 → `STEP_UP_REQUIRED`; owner approves/declines before it may settle |
 | **Auto-freeze circuit breaker** | Wallet | N guard anomalies in a window → wallet freezes itself (`AEGIS_BREAKER_*`) |
+| **Pluggable settlement rails** | Rail | settlement routes through a rail plugin (`sandbox` / `usdc-testnet` / `ach-lite`) — the guard never changes |
 
 ## Stack
 
@@ -63,7 +64,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 56 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator suites
+- **Vitest** — 59 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail suites
 
 ## Getting started
 
@@ -100,6 +101,7 @@ All endpoints require `Authorization: Bearer <key>`.
 | `POST` | `/api/transactions/:id/stepup` | Owner decision on a high-risk transfer (`approve`/`decline`) |
 | `GET` | `/api/breaker` | Circuit-breaker state per wallet |
 | `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
+| `GET` | `/api/rails` | Active settlement rail + available rails |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
@@ -180,7 +182,7 @@ src/
     store.ts       #   ledger, outbox, policy versions, agent keys, breaker
     seed.ts        #   demo constants
     guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
-    risk.test.ts / stepup.test.ts / simulate.test.ts
+    risk.test.ts / stepup.test.ts / simulate.test.ts / rails.test.ts
     test-env.ts    #   in-memory DB env for tests
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
@@ -202,6 +204,8 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_STEPUP_TTL_MS` | `120000` | how long an owner has to decide on a high-risk transfer |
 | `AEGIS_BREAKER_THRESHOLD` | `5` | anomalies within the window that auto-freeze a wallet |
 | `AEGIS_BREAKER_WINDOW_MS` | `60000` | circuit-breaker observation window |
+| `AEGIS_RAIL` | `sandbox` | active settlement rail: `sandbox`, `usdc-testnet`, or `ach-lite` |
+| `AEGIS_USDC_RAIL_URL` | unset | optional gateway URL for real USDC settlement |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set

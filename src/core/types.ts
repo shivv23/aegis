@@ -36,7 +36,8 @@ export type RejectionReason =
   | "REQUEST_EXPIRED"
   | "RISK_REJECTED"
   | "STEP_UP_DECLINED"
-  | "STEP_UP_EXPIRED";
+  | "STEP_UP_EXPIRED"
+  | "RAIL_FAILED";
 
 export interface Transaction {
   id: string;
@@ -54,6 +55,7 @@ export interface Transaction {
   revokedAt?: number;
   nonce: string;
   stepUpScore?: number;
+  externalRef?: string;
 }
 
 export type AuditActor = "agent" | "owner" | "system";

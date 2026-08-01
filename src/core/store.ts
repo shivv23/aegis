@@ -18,6 +18,7 @@ import type {
 } from "./types";
 import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
+import { getRail } from "./rails";
 import { SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
@@ -126,6 +127,7 @@ async function init(client: Db): Promise<void> {
       revoked_at INTEGER,
       nonce TEXT NOT NULL,
       step_up_score REAL,
+      external_ref TEXT,
       seq INTEGER,
       prev_hash TEXT,
       hash TEXT,
@@ -197,6 +199,9 @@ async function init(client: Db): Promise<void> {
   }
   if (!(await hasColumn(client, "transactions", "step_up_score"))) {
     await client.execute("ALTER TABLE transactions ADD COLUMN step_up_score REAL");
+  }
+  if (!(await hasColumn(client, "transactions", "external_ref"))) {
+    await client.execute("ALTER TABLE transactions ADD COLUMN external_ref TEXT");
   }
   if (!(await hasColumn(client, "audit", "seq"))) {
     await client.execute("ALTER TABLE audit ADD COLUMN seq INTEGER");
@@ -461,6 +466,7 @@ function rowToTransaction(row: Record<string, unknown>): Transaction {
     revokedAt: row.revoked_at ? Number(row.revoked_at) : undefined,
     nonce: row.nonce as string,
     stepUpScore: row.step_up_score != null ? Number(row.step_up_score) : undefined,
+    externalRef: row.external_ref ? (row.external_ref as string) : undefined,
   };
 }
 
@@ -743,9 +749,32 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
         details: `Transaction ${tx.id.slice(0, 8)} revoked after hold window because wallet was not active`,
       });
     } else {
+      const result = await getRail().execute({
+        txId: tx.id,
+        walletId: tx.walletId,
+        to: tx.to,
+        amount: tx.amount,
+        purpose: tx.purpose,
+        nonce: tx.nonce,
+        requestedAt: tx.requestedAt,
+      });
+      if (result.status === "FAILED") {
+        await transitionTransaction(tx.id, "BLOCKED", {
+          rejectionReason: "RAIL_FAILED",
+          blockedAt: now,
+        });
+        await addAudit({
+          walletId: tx.walletId,
+          actor: "system",
+          action: "TX_SETTLEMENT_FAILED",
+          details: `Rail ${getRail().id} rejected settlement of ${tx.amount} to ${tx.to}: ${result.detail ?? "unknown"}`,
+        });
+        continue;
+      }
       await debitWallet(tx.walletId, tx.amount);
       const next = await transitionTransaction(tx.id, "SETTLED", {
         settledAt: now,
+        externalRef: result.externalRef,
       });
       if (next) {
         settled.push(next);
@@ -753,7 +782,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
           walletId: tx.walletId,
           actor: "system",
           action: "TX_SETTLED",
-          details: `${tx.amount} settled to ${tx.to}`,
+          details: `${tx.amount} settled to ${tx.to} via rail ${getRail().id} (${result.externalRef ?? "local"})`,
         });
       }
     }
@@ -947,7 +976,7 @@ export async function createTransaction(
   await appendLedgerRow(
     s.client,
     "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score"],
+    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref"],
     [
       id,
       input.walletId,
@@ -964,6 +993,7 @@ export async function createTransaction(
       input.revokedAt ?? null,
       input.nonce,
       input.stepUpScore ?? null,
+      input.externalRef ?? null,
     ],
     txContent({
       walletId: input.walletId,
@@ -988,7 +1018,7 @@ export async function createTransaction(
 export async function transitionTransaction(
   id: string,
   to: TxStatus,
-  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number; pendingUntil?: number } = {},
+  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number; pendingUntil?: number; externalRef?: string } = {},
 ): Promise<Transaction | null> {
   const s = getStore();
   await s.ready;
@@ -1006,10 +1036,11 @@ export async function transitionTransaction(
     blockedAt: fields.blockedAt ?? tx.blockedAt,
     revokedAt: fields.revokedAt ?? tx.revokedAt,
     pendingUntil: fields.pendingUntil ?? tx.pendingUntil,
+    externalRef: fields.externalRef ?? tx.externalRef,
   };
 
   await s.client.execute(
-    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ? WHERE id = ?`,
+    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ?, external_ref = ? WHERE id = ?`,
     [
       next.status,
       next.rejectionReason ?? null,
@@ -1017,6 +1048,7 @@ export async function transitionTransaction(
       next.blockedAt ?? null,
       next.revokedAt ?? null,
       next.pendingUntil ?? null,
+      next.externalRef ?? null,
       id,
     ],
   );
