@@ -11,6 +11,7 @@ import {
   Bot,
   ShieldCheck,
   FlaskConical,
+  Users,
 } from "lucide-react";
 
 const links = [
@@ -19,6 +20,7 @@ const links = [
   { href: "/audit", label: "Audit Trail", icon: ScrollText },
   { href: "/simulator", label: "Agent Simulator", icon: Bot },
   { href: "/sandbox", label: "Policy Sandbox", icon: FlaskConical },
+  { href: "/multisig", label: "Multi-sig", icon: Users },
 ];
 
 export function Sidebar() {

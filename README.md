@@ -51,6 +51,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Step-up approval** | Wallet | risk score ≥ 55 → `STEP_UP_REQUIRED`; owner approves/declines before it may settle |
 | **Auto-freeze circuit breaker** | Wallet | N guard anomalies in a window → wallet freezes itself (`AEGIS_BREAKER_*`) |
 | **Pluggable settlement rails** | Rail | settlement routes through a rail plugin (`sandbox` / `usdc-testnet` / `ach-lite`) — the guard never changes |
+| **2-of-3 multi-sig owners** | Keys | owner control-plane keys are only minted after 2 distinct signers approve |
 
 ## Stack
 
@@ -64,7 +65,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 59 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail suites
+- **Vitest** — 68 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig suites
 - **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green
 
 ## Getting started
@@ -108,6 +109,11 @@ All endpoints require `Authorization: Bearer <key>`.
 | `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
 | `GET` | `/api/rails` | Active settlement rail + available rails |
 | `GET` | `/api/guardian` | On-chain mirror: Guardian/PolicyRegistry addresses + sealed policy hash |
+| `GET/POST` | `/api/signers` | List / register multi-sig signers (register is master-key only) |
+| `DELETE` | `/api/signers/:id` | Remove a signer (master key only) |
+| `GET/POST` | `/api/approvals` | List / propose an owner-key issuance (2-of-3) |
+| `POST` | `/api/approvals/:id/approve` | A signer approves; the minted key is returned at threshold |
+| `POST` | `/api/approvals/:id/reject` | A signer vetoes the issuance |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
@@ -160,6 +166,10 @@ PENDING ── owner revokes / wallet frozen ──▶ REVOKED (IN_FLIGHT_REVOKE
     active policy hash is sealed in `contracts/PolicyRegistry.sol` — a
     compromised server can't silently rewrite the limits. `revoke()` on-chain
     is one-way: no agent, and no stolen key, can un-freeze it.
+12. **Multi-sig owner issuance.** Owner keys — the only credential that can
+    change policy or trigger the kill switch — are issued 2-of-3. The demo
+    mints them deterministically per signer; approval requires two distinct
+    signers, and duplicate votes are rejected.
 
 ## Demo script (5 minutes)
 
@@ -192,13 +202,15 @@ src/
     store.ts       #   ledger, outbox, policy versions, agent keys, breaker
     seed.ts        #   demo constants
     guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
-    risk.test.ts / stepup.test.ts / simulate.test.ts / rails.test.ts
+    risk.test.ts / stepup.test.ts / simulate.test.ts / rails.test.ts /
+    multisig.test.ts
     test-env.ts    #   in-memory DB env for tests
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
                    # Transactions, Audit, Agent Simulator
   components/      # dashboard + simulator console + ledger badge
   hooks/use-stream.ts  # SSE client
+  app/multisig/     # 2-of-3 signer approval console
 contracts/         # Hardhat: Guardian.sol + PolicyRegistry.sol (on-chain mirror)
 scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the real rail
 ```
@@ -217,6 +229,8 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_BREAKER_WINDOW_MS` | `60000` | circuit-breaker observation window |
 | `AEGIS_RAIL` | `sandbox` | active settlement rail: `sandbox`, `usdc-testnet`, or `ach-lite` |
 | `AEGIS_USDC_RAIL_URL` | unset | optional gateway URL for real USDC settlement |
+| `AEGIS_MULTISIG_REQUIRED` | `2` | distinct signers needed to mint an owner key (2-of-3) |
+| `AEGIS_MULTISIG_TTL_MS` | `600000` | how long an open approval stays valid |
 | `AEGIS_GUARDIAN_ADDRESS` | unset | deployed `Guardian` address (shown on `/api/guardian`) |
 | `AEGIS_POLICY_REGISTRY` | unset | deployed `PolicyRegistry` address |
 | `AEGIS_RPC_URL` | unset | chain RPC for the on-chain mirror |

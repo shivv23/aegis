@@ -8,12 +8,43 @@ export interface Bootstrap {
   ownerKey: string;
   seedWalletId: string;
   seeded: boolean;
+  signers: Array<{ id: string; name: string; role: string; key: string }>;
 }
+
+const SIGNER_KEYS = "aegis-signer-keys";
 
 export async function getBootstrap(): Promise<Bootstrap> {
   const res = await fetch("/api/bootstrap");
   if (!res.ok) throw new Error("Bootstrap failed");
   return res.json();
+}
+
+export async function getSignerKeys(): Promise<Bootstrap["signers"]> {
+  const cached = localStorage.getItem(SIGNER_KEYS);
+  if (cached) return JSON.parse(cached);
+  const b = await getBootstrap();
+  localStorage.setItem(SIGNER_KEYS, JSON.stringify(b.signers));
+  return b.signers;
+}
+
+export async function signerApi<T = unknown>(
+  signerKey: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await fetch(path, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${signerKey}`,
+      ...(init.headers ?? {}),
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error ?? `Request failed: ${res.status}`);
+  }
+  return data as T;
 }
 
 export async function ensureOwnerKey(): Promise<string> {

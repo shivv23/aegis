@@ -75,6 +75,8 @@ export interface ScopedKeyClaims {
   walletId: string;
   scope: Scope;
   role: string;
+  /** Optional signer identity for multi-sig owner key issuance. */
+  keyId?: string;
 }
 
 export interface TransferRequest {
@@ -150,4 +152,32 @@ export interface RiskVerdict {
   score: number;
   level: RiskLevel;
   factors: RiskFactor[];
+}
+
+export type SignerRole = "admin" | "ops" | "treasury";
+
+export interface Signer {
+  id: string;
+  name: string;
+  role: SignerRole;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
+
+export type ApprovalOperation = "MINT_OWNER_KEY";
+
+export interface Approval {
+  id: string;
+  operation: ApprovalOperation;
+  walletId: string;
+  label: string;
+  proposer: string;
+  required: number;
+  approvers: string[];
+  status: ApprovalStatus;
+  createdAt: number;
+  expiresAt: number;
+  keyMinted: boolean;
 }

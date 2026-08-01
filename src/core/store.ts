@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createDb, type Db } from "./db";
 import type {
+  Approval,
   AuditLogEntry,
   AgentKeyRecord,
   OutboxEntry,
   PolicyVersion,
   PolicyVersionStatus,
   RejectionReason,
+  Signer,
+  SignerRole,
   TxStatus,
   Transaction,
   Wallet,
@@ -19,6 +22,7 @@ import type {
 import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
 import { getRail } from "./rails";
+import { signKey } from "./keys";
 import { SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
@@ -185,6 +189,30 @@ async function init(client: Db): Promise<void> {
       created_at INTEGER NOT NULL,
       delivered_at INTEGER,
       attempt_count INTEGER NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS signers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS approvals (
+      id TEXT PRIMARY KEY,
+      operation TEXT NOT NULL,
+      wallet_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      proposer TEXT NOT NULL,
+      required INTEGER NOT NULL,
+      approvers TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      key_minted INTEGER NOT NULL
     )
   `);
 
@@ -369,6 +397,8 @@ export async function resetStore(): Promise<Wallet[]> {
   await s.client.execute("DELETE FROM agent_keys");
   await s.client.execute("DELETE FROM policy_versions");
   await s.client.execute("DELETE FROM outbox");
+  await s.client.execute("DELETE FROM signers");
+  await s.client.execute("DELETE FROM approvals");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
@@ -1177,4 +1207,237 @@ export async function revokeAgentKey(
 export { getStore };
 export function getEvents() {
   return getStore().events;
+}
+
+/**
+ * Multi-sig (2-of-3 by default): owner control-plane keys are only issued
+ * after `MULTISIG_REQUIRED` distinct registered signers approve. Signers are
+ * created by the master key; each authenticates with its own owner-scoped key
+ * carrying `keyId`. The demo stays 1-of-1 at the rail; this protects key
+ * issuance, the one operation that could give an attacker full control.
+ */
+export const MULTISIG_REQUIRED = Number(process.env.AEGIS_MULTISIG_REQUIRED ?? 2);
+export const MULTISIG_TTL_MS = Number(process.env.AEGIS_MULTISIG_TTL_MS ?? 600000);
+
+const DEFAULT_SIGNER_SEED: Array<{ name: string; role: SignerRole }> = [
+  { name: "Ops Guard", role: "ops" },
+  { name: "Treasury Guard", role: "treasury" },
+  { name: "Admin Guard", role: "admin" },
+];
+
+function rowToSigner(row: Record<string, unknown>): Signer {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    role: row.role as SignerRole,
+    enabled: Number(row.enabled) === 1,
+    createdAt: Number(row.created_at),
+  };
+}
+
+function rowToApproval(row: Record<string, unknown>): Approval {
+  return {
+    id: row.id as string,
+    operation: row.operation as Approval["operation"],
+    walletId: row.wallet_id as string,
+    label: row.label as string,
+    proposer: row.proposer as string,
+    required: Number(row.required),
+    approvers: JSON.parse(row.approvers as string) as string[],
+    status: row.status as Approval["status"],
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    keyMinted: Number(row.key_minted) === 1,
+  };
+}
+
+/** Creates the three demo signers the first time they are needed. */
+export async function ensureDefaultSigners(): Promise<Signer[]> {
+  const s = getStore();
+  await s.ready;
+  const existing = await listSigners();
+  if (existing.length > 0) return existing;
+  const created: Signer[] = [];
+  for (const seed of DEFAULT_SIGNER_SEED) {
+    created.push(await addSigner(seed.name, seed.role));
+  }
+  return created;
+}
+
+export async function listSigners(): Promise<Signer[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM signers ORDER BY created_at ASC");
+  return rows.map(rowToSigner);
+}
+
+export async function getSigner(id: string): Promise<Signer | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM signers WHERE id = ?", [id]);
+  const row = rows[0];
+  return row ? rowToSigner(row) : null;
+}
+
+export async function addSigner(name: string, role: SignerRole): Promise<Signer> {
+  const s = getStore();
+  await s.ready;
+  const signer: Signer = {
+    id: randomUUID(),
+    name,
+    role,
+    enabled: true,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    `INSERT INTO signers (id, name, role, enabled, created_at) VALUES (?, ?, ?, 1, ?)`,
+    [signer.id, signer.name, signer.role, signer.createdAt],
+  );
+  return signer;
+}
+
+export async function removeSigner(id: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT COUNT(*) AS n FROM signers WHERE id = ?", [id]);
+  if (Number(rows[0]?.n ?? 0) === 0) return false;
+  await s.client.execute("DELETE FROM signers WHERE id = ?", [id]);
+  return true;
+}
+
+export async function listApprovals(): Promise<Approval[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM approvals ORDER BY created_at DESC");
+  return rows.map(rowToApproval);
+}
+
+export async function getApproval(id: string): Promise<Approval | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM approvals WHERE id = ?", [id]);
+  const row = rows[0];
+  return row ? rowToApproval(row) : null;
+}
+
+export async function proposeApproval(input: {
+  operation: Approval["operation"];
+  walletId: string;
+  label: string;
+  proposer: string;
+  required?: number;
+}): Promise<Approval> {
+  const s = getStore();
+  await s.ready;
+  const approval: Approval = {
+    id: randomUUID(),
+    operation: input.operation,
+    walletId: input.walletId,
+    label: input.label,
+    proposer: input.proposer,
+    required: input.required ?? MULTISIG_REQUIRED,
+    approvers: [],
+    status: "PENDING",
+    createdAt: Date.now(),
+    expiresAt: Date.now() + MULTISIG_TTL_MS,
+    keyMinted: false,
+  };
+  await s.client.execute(
+    `INSERT INTO approvals (id, operation, wallet_id, label, proposer, required, approvers, status, created_at, expires_at, key_minted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, 0)`,
+    [
+      approval.id,
+      approval.operation,
+      approval.walletId,
+      approval.label,
+      approval.proposer,
+      approval.required,
+      JSON.stringify(approval.approvers),
+      approval.createdAt,
+      approval.expiresAt,
+    ],
+  );
+  await addAudit({
+    walletId: approval.walletId,
+    actor: "owner",
+    action: "MULTISIG_PROPOSED",
+    details: `Requested ${approval.operation} for '${approval.label}' (needs ${approval.required} signers)`,
+  });
+  return approval;
+}
+
+/**
+ * Records a signer's approval. When the threshold is reached the owner key is
+ * minted exactly once and returned. Returns the updated approval and the key
+ * (only to the caller that crossed the threshold).
+ */
+export async function approveApproval(
+  id: string,
+  signerId: string,
+): Promise<{ approval: Approval; mintedKey?: string }> {
+  const s = getStore();
+  await s.ready;
+  const approval = await getApproval(id);
+  if (!approval) throw new Error("Approval not found");
+  if (approval.status !== "PENDING") {
+    throw new Error(`Approval already ${approval.status.toLowerCase()}`);
+  }
+  if (Date.now() > approval.expiresAt) {
+    await s.client.execute("UPDATE approvals SET status = 'EXPIRED' WHERE id = ?", [id]);
+    throw new Error("Approval expired");
+  }
+  const signer = await getSigner(signerId);
+  if (!signer || !signer.enabled) throw new Error("Unknown or disabled signer");
+  if (approval.approvers.includes(signerId)) throw new Error("Signer already approved");
+
+  const approvers = [...approval.approvers, signerId];
+  await addAudit({
+    walletId: approval.walletId,
+    actor: "owner",
+    action: "MULTISIG_APPROVED",
+    details: `${signer.name} (${signer.role}) approved ${approval.operation} for '${approval.label}' (${approvers.length}/${approval.required})`,
+  });
+
+  if (approvers.length < approval.required) {
+    await s.client.execute(
+      "UPDATE approvals SET approvers = ?, status = 'PENDING' WHERE id = ?",
+      [JSON.stringify(approvers), id],
+    );
+    const updated = await getApproval(id);
+    return { approval: updated! };
+  }
+
+  const mintedKey = await signKey(approval.walletId, "owner");
+  await s.client.execute(
+    "UPDATE approvals SET approvers = ?, status = 'APPROVED', key_minted = 1 WHERE id = ?",
+    [JSON.stringify(approvers), id],
+  );
+  await addAudit({
+    walletId: approval.walletId,
+    actor: "system",
+    action: "MULTISIG_OWNER_KEY_MINTED",
+    details: `Owner key for '${approval.label}' minted after ${approvers.length}-of-${approval.required} signer approval`,
+  });
+  const updated = await getApproval(id);
+  return { approval: updated!, mintedKey };
+}
+
+/** Rejects an open approval (any registered signer). */
+export async function rejectApproval(id: string, signerId: string): Promise<Approval> {
+  const s = getStore();
+  await s.ready;
+  const approval = await getApproval(id);
+  if (!approval) throw new Error("Approval not found");
+  if (approval.status !== "PENDING") {
+    throw new Error(`Approval already ${approval.status.toLowerCase()}`);
+  }
+  await s.client.execute("UPDATE approvals SET status = 'REJECTED' WHERE id = ?", [id]);
+  await addAudit({
+    walletId: approval.walletId,
+    actor: "owner",
+    action: "MULTISIG_REJECTED",
+    details: `Signer ${signerId} rejected ${approval.operation} for '${approval.label}'`,
+  });
+  const updated = await getApproval(id);
+  return updated!;
 }
