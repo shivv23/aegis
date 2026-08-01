@@ -823,6 +823,8 @@ export async function resetStore(options: { reseed?: boolean } = {}): Promise<Wa
   await s.client.execute("DELETE FROM escrows");
   await s.client.execute("DELETE FROM usage");
   await s.client.execute("DELETE FROM secrets");
+  await s.client.execute("DELETE FROM orgs");
+  await s.client.execute("DELETE FROM sessions");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
