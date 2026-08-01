@@ -4,14 +4,34 @@ import { join } from "path";
 
 const POLICY_URI = "ipfs://aegis-policy-v1";
 
+/**
+ * Builds the exact WalletPolicy the app seeds for the demo wallet
+ * (see src/core/seed.ts + src/core/store.ts runSeed) so the hash sealed
+ * on-chain equals the hash the app computes via policyHash().
+ */
+function appPolicy(perTxCap: number, dailyLimit: number, velocityLimitPerMin: number) {
+  return {
+    maxPerTx: perTxCap,
+    dailyLimit,
+    monthlyLimit: 5000,
+    velocityLimitPerMin,
+    allowlist: ["compute:0xCAFE0001", "api:0xBEEF0002", "storage:0xDEAD0003"],
+  };
+}
+
 async function main() {
   const [deployer] = await ethers.getSigners();
 
-  const perTxCap = Number(process.env.AEGIS_POLICY_PER_TX ?? 1000);
-  const dailyLimit = Number(process.env.AEGIS_POLICY_DAILY ?? 5000);
-  const velocityWindow = Number(process.env.AEGIS_POLICY_VELOCITY_WINDOW ?? 3600);
-  const velocityMax = Number(process.env.AEGIS_POLICY_VELOCITY_MAX ?? 3);
+  const perTxCap = Number(process.env.AEGIS_POLICY_PER_TX ?? 100);
+  const dailyLimit = Number(process.env.AEGIS_POLICY_DAILY ?? 1000);
+  const velocityWindow = Number(process.env.AEGIS_POLICY_VELOCITY_WINDOW ?? 60);
+  const velocityMax = Number(process.env.AEGIS_POLICY_VELOCITY_MAX ?? 30);
   const allowlist = (process.env.AEGIS_POLICY_ALLOWLIST ?? "").split(",").filter(Boolean);
+
+  // Identical to src/core/store.ts policyHash(): sha256 hex of JSON.stringify(policy).
+  const policyHash = ethers.sha256(
+    ethers.toUtf8Bytes(JSON.stringify(appPolicy(perTxCap, dailyLimit, velocityMax))),
+  );
 
   console.log("Deploying Guardian with", deployer.address, {
     perTxCap,
@@ -27,12 +47,6 @@ async function main() {
   const PolicyRegistry = await ethers.getContractFactory("PolicyRegistry");
   const registry = await PolicyRegistry.deploy();
   await registry.waitForDeployment();
-
-  const policyHash = ethers.keccak256(
-    ethers.toUtf8Bytes(
-      `aegis-policy-v1:perTx=${perTxCap},daily=${dailyLimit},velocity=${velocityMax}/${velocityWindow}s`,
-    ),
-  );
 
   for (const payee of allowlist) {
     await (await guardian.addAllowlist(payee)).wait();

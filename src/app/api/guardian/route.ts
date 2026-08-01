@@ -24,6 +24,9 @@ export async function GET(req: NextRequest) {
   const hash = wallet ? policyHash(wallet.policy) : null;
   const onChain = await readOnChainMirror();
 
+  const sealed = onChain.registry.sealedHash?.toLowerCase();
+  const matches = hash !== null && sealed !== undefined && sealed === "0x" + hash.toLowerCase();
+
   return json({
     guardian: {
       address: process.env.AEGIS_GUARDIAN_ADDRESS ?? null,
@@ -41,7 +44,7 @@ export async function GET(req: NextRequest) {
       hash,
       sealed: Boolean(process.env.AEGIS_POLICY_REGISTRY && process.env.AEGIS_GUARDIAN_ADDRESS),
       onChain: onChain.registry.sealedHash,
-      matches: onChain.matches,
+      matches,
       error: onChain.error ?? null,
       note: "Policy hash is sealed on-chain via the PolicyRegistry; the Guardian enforces per-tx cap, allowlist, daily and velocity limits, and a one-way revoke().",
     },
