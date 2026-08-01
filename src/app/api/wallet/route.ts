@@ -34,12 +34,14 @@ export async function POST(req: NextRequest) {
   const { name, ownerDid, balance, policy } = parsed.data;
 
   // Org-scoped owner keys can only create wallets inside their own org.
-  // If no org is given, infer one from a did:org:<id> ownerDid so the wallet
-  // joins the org fleet (and the org kill-switch can gate it).
+  // If no org is given, infer one from a did:org:<name> ownerDid so the wallet
+  // joins the org fleet (and the org kill-switch can gate it). Matches both
+  // the bare id (<name>) and the org-<name> convention used by the seed.
   let orgId = claims?.orgId ?? parsed.data.orgId;
   if (!orgId && ownerDid.startsWith("did:org:")) {
-    const inferred = ownerDid.slice("did:org:".length);
-    if (await getOrg(inferred)) orgId = inferred;
+    const suffix = ownerDid.slice("did:org:".length);
+    const candidate = (await getOrg(suffix)) ? suffix : (await getOrg(`org-${suffix}`)) ? `org-${suffix}` : undefined;
+    if (candidate) orgId = candidate;
   }
   if (orgId) {
     const org = await getOrg(orgId);
