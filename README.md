@@ -63,7 +63,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 53 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker suites
+- **Vitest** — 56 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator suites
 
 ## Getting started
 
@@ -99,6 +99,7 @@ All endpoints require `Authorization: Bearer <key>`.
 | `POST` | `/api/transactions/:id/revoke` | Revoke an in-flight transaction |
 | `POST` | `/api/transactions/:id/stepup` | Owner decision on a high-risk transfer (`approve`/`decline`) |
 | `GET` | `/api/breaker` | Circuit-breaker state per wallet |
+| `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
@@ -170,6 +171,7 @@ src/
   core/            # enforcement heart (framework-free, fully tested)
     guard.ts       #   pure policy engine — the single choke point
     risk.ts        #   deterministic pre-tx risk scoring (0–100)
+    simulate.ts    #   what-if policy replay (read-only)
     stateMachine.ts#   tx status transitions
     signing.ts     #   Ed25519 agent keypairs: sign/verify/canonical message
     ledger.ts      #   SHA-256 hash chain: append, verify, rechain
@@ -178,7 +180,7 @@ src/
     store.ts       #   ledger, outbox, policy versions, agent keys, breaker
     seed.ts        #   demo constants
     guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
-    risk.test.ts / stepup.test.ts
+    risk.test.ts / stepup.test.ts / simulate.test.ts
     test-env.ts    #   in-memory DB env for tests
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
