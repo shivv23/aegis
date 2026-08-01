@@ -6,6 +6,7 @@ import { useStream } from "@/hooks/use-stream";
 import { Button, Card, StatCard, WalletBadge } from "@/components/ui";
 import { LiveFeed } from "@/components/live-feed";
 import { ownerApi } from "@/lib/api-client";
+import { LedgerBadge } from "@/components/ledger-badge";
 import { money, shortId } from "@/lib/utils";
 import { Snowflake, Zap, Siren, RotateCcw } from "lucide-react";
 
@@ -63,6 +64,7 @@ export default function CommandCenter() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <LedgerBadge />
           <Button variant="outline" size="sm" onClick={resetDemo} title="Reset demo data">
             <RotateCcw className="h-3.5 w-3.5" /> Reset demo
           </Button>

@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { addAudit, getWallet, listAudit, listTransactions, settleDue, updatePolicy } from "@/core/store";
+import { addAudit, getPendingPolicy, getWallet, listAudit, listPolicyVersions, listTransactions, settleDue, updatePolicy } from "@/core/store";
 
 export const runtime = "nodejs";
 
@@ -18,11 +18,13 @@ export async function GET(
   const wallet = await getWallet(id);
   if (!wallet) return error("Wallet not found", 404);
 
-  const [transactions, audit] = await Promise.all([
+  const [transactions, audit, pendingPolicy, policyVersions] = await Promise.all([
     listTransactions(id),
     listAudit(id),
+    getPendingPolicy(id),
+    listPolicyVersions(id),
   ]);
-  return json({ wallet, transactions, audit });
+  return json({ wallet, transactions, audit, pendingPolicy, policyVersions });
 }
 
 const patchSchema = z.object({
@@ -45,15 +47,19 @@ export async function PATCH(
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return error("Invalid policy patch", 400);
 
-  const wallet = await updatePolicy(id, parsed.data);
-  if (!wallet) return error("Wallet not found", 404);
+  const result = await updatePolicy(id, parsed.data, claims!.walletId);
+  if (!result) return error("Wallet not found", 404);
+
+  const { wallet, pending } = result;
 
   await addAudit({
     walletId: id,
     actor: "owner",
     action: "POLICY_UPDATED",
-    details: JSON.stringify(parsed.data),
+    details: `Policy changed, effective ${
+      pending.effectiveAt <= Date.now() ? "immediately" : `at ${new Date(pending.effectiveAt).toISOString()}`
+    } (hash ${pending.policyHash.slice(0, 12)}): ${JSON.stringify(parsed.data)}`,
   });
 
-  return json({ wallet });
+  return json({ wallet, pendingPolicy: pending });
 }

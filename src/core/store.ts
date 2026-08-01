@@ -1,10 +1,14 @@
 import { EventEmitter } from "node:events";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createDb, type Db } from "./db";
 import type {
   AuditLogEntry,
+  AgentKeyRecord,
+  OutboxEntry,
+  PolicyVersion,
+  PolicyVersionStatus,
   RejectionReason,
   TxStatus,
   Transaction,
@@ -13,9 +17,23 @@ import type {
   WalletStatus,
 } from "./types";
 import { assertTransition } from "./stateMachine";
-import { seed } from "./seed";
+import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
+import { SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
+
+const isDemoMode = () => process.env.AEGIS_DEMO_MODE !== "0";
+
+/** Policy changes take effect after a timelock. Disabled in demo mode. */
+export const POLICY_TIMELOCK_MS = process.env.AEGIS_POLICY_TIMELOCK_MS
+  ? Number(process.env.AEGIS_POLICY_TIMELOCK_MS)
+  : isDemoMode()
+    ? 0
+    : 300000;
+
+export function policyHash(policy: WalletPolicy): string {
+  return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+}
 
 function resolveUrl(): string {
   if (process.env.AEGIS_DB_URL) return process.env.AEGIS_DB_URL;
@@ -55,6 +73,18 @@ export async function consumeNonce(nonce: string): Promise<boolean> {
   return true;
 }
 
+async function hasColumn(client: Db, table: string, column: string): Promise<boolean> {
+  try {
+    const { rows } = await client.execute(
+      `SELECT ${column} FROM ${table} LIMIT 1`,
+    );
+    void rows;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function init(client: Db): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS wallets (
@@ -86,7 +116,11 @@ async function init(client: Db): Promise<void> {
       settled_at INTEGER,
       blocked_at INTEGER,
       revoked_at INTEGER,
-      nonce TEXT NOT NULL
+      nonce TEXT NOT NULL,
+      seq INTEGER,
+      prev_hash TEXT,
+      hash TEXT,
+      canonical TEXT
     )
   `);
   await client.execute(`
@@ -96,13 +130,285 @@ async function init(client: Db): Promise<void> {
       actor TEXT NOT NULL,
       action TEXT NOT NULL,
       details TEXT NOT NULL,
-      timestamp INTEGER NOT NULL
+      timestamp INTEGER NOT NULL,
+      seq INTEGER,
+      prev_hash TEXT,
+      hash TEXT,
+      canonical TEXT
     )
   `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS ledger_state (
+      id INTEGER PRIMARY KEY,
+      head_hash TEXT NOT NULL,
+      row_count INTEGER NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS agent_keys (
+      wallet_id TEXT NOT NULL,
+      public_key TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      revoked_at INTEGER
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS policy_versions (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      policy TEXT NOT NULL,
+      policy_hash TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      effective_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      status TEXT NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS outbox (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      delivered_at INTEGER,
+      attempt_count INTEGER NOT NULL
+    )
+  `);
+
+  // v1 → v2 migration: old tables lack the hash-chain columns.
+  const migrated: Array<"transactions" | "audit"> = [];
+  if (!(await hasColumn(client, "transactions", "seq"))) {
+    await client.execute("ALTER TABLE transactions ADD COLUMN seq INTEGER");
+    await client.execute("ALTER TABLE transactions ADD COLUMN prev_hash TEXT");
+    await client.execute("ALTER TABLE transactions ADD COLUMN hash TEXT");
+    await client.execute("ALTER TABLE transactions ADD COLUMN canonical TEXT");
+    migrated.push("transactions");
+  }
+  if (!(await hasColumn(client, "audit", "seq"))) {
+    await client.execute("ALTER TABLE audit ADD COLUMN seq INTEGER");
+    await client.execute("ALTER TABLE audit ADD COLUMN prev_hash TEXT");
+    await client.execute("ALTER TABLE audit ADD COLUMN hash TEXT");
+    await client.execute("ALTER TABLE audit ADD COLUMN canonical TEXT");
+    migrated.push("audit");
+  }
+  if (migrated.length > 0) {
+    await rechain(client, migrated);
+  }
+
   const { rows } = await client.execute("SELECT COUNT(*) AS n FROM wallets");
   if (Number(rows[0]?.n ?? 0) === 0) {
-    await seed(client);
+    await runSeed(client);
   }
+}
+
+/**
+ * Seeds the demo wallet through the same chained-insert path the API uses,
+ * so the seeded ledger verifies like any other. Runs during init (before
+ * `ready` resolves) — must not call functions that await `ready`.
+ */
+async function runSeed(client: Db): Promise<void> {
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  const policy: WalletPolicy = {
+    maxPerTx: 100,
+    dailyLimit: 1000,
+    monthlyLimit: 5000,
+    velocityLimitPerMin: 30,
+    allowlist: [...SEED_VENDORS],
+  };
+
+  await client.execute(
+    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at)
+     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      SEED_WALLET_ID,
+      "TradingBot-42",
+      "did:org:acme",
+      9975,
+      policy.maxPerTx,
+      policy.dailyLimit,
+      policy.monthlyLimit,
+      policy.velocityLimitPerMin,
+      JSON.stringify(policy.allowlist),
+      now - 30 * dayMs,
+    ],
+  );
+
+  const history: Array<{
+    to: string;
+    amount: number;
+    purpose: string;
+    age: number;
+  }> = [
+    { to: "compute:0xCAFE0001", amount: 40, purpose: "GPU burst #147", age: 50 },
+    { to: "api:0xBEEF0002", amount: 15, purpose: "LLM API quota", age: 30 },
+    { to: "storage:0xDEAD0003", amount: 8, purpose: "Vector DB storage", age: 15 },
+    { to: "compute:0xCAFE0001", amount: 25, purpose: "GPU burst #146", age: 10 },
+  ];
+
+  for (const h of history) {
+    const settledAt = now - h.age;
+    const nonce = randomUUID();
+    const content = txContent({
+      walletId: SEED_WALLET_ID,
+      from: SEED_WALLET_ID,
+      to: h.to,
+      amount: h.amount,
+      purpose: h.purpose,
+      nonce,
+      requestedAt: settledAt,
+    });
+    await appendLedgerRow(
+      client,
+      "transactions",
+      ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
+      [
+        randomUUID(),
+        SEED_WALLET_ID,
+        SEED_WALLET_ID,
+        h.to,
+        h.amount,
+        h.purpose,
+        "SETTLED",
+        null,
+        settledAt,
+        settledAt,
+        settledAt,
+        null,
+        null,
+        nonce,
+      ],
+      content,
+    );
+  }
+
+  await client.execute(
+    `INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`,
+    [
+      randomUUID(),
+      SEED_WALLET_ID,
+      JSON.stringify(policy),
+      policyHash(policy),
+      "system",
+      now - 30 * dayMs,
+      now - 30 * dayMs,
+    ],
+  );
+
+  await appendLedgerRow(
+    client,
+    "audit",
+    ["id", "wallet_id", "actor", "action", "details", "timestamp"],
+    [
+      randomUUID(),
+      SEED_WALLET_ID,
+      "system",
+      "WALLET_CREATED",
+      "Wallet provisioned for TradingBot-42",
+      now - 30 * dayMs,
+    ],
+    auditContent({
+      walletId: SEED_WALLET_ID,
+      actor: "system",
+      action: "WALLET_CREATED",
+      details: "Wallet provisioned for TradingBot-42",
+      timestamp: now - 30 * dayMs,
+    }),
+  );
+  await appendLedgerRow(
+    client,
+    "audit",
+    ["id", "wallet_id", "actor", "action", "details", "timestamp"],
+    [
+      randomUUID(),
+      SEED_WALLET_ID,
+      "system",
+      "POLICY_SET",
+      "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
+      now - 30 * dayMs,
+    ],
+    auditContent({
+      walletId: SEED_WALLET_ID,
+      actor: "system",
+      action: "POLICY_SET",
+      details: "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
+      timestamp: now - 30 * dayMs,
+    }),
+  );
+}
+
+export async function resetStore(): Promise<Wallet[]> {
+  const s = getStore();
+  await s.ready;
+  s.nonces.clear();
+  await s.client.execute("DELETE FROM transactions");
+  await s.client.execute("DELETE FROM audit");
+  await s.client.execute("DELETE FROM wallets");
+  await s.client.execute("DELETE FROM agent_keys");
+  await s.client.execute("DELETE FROM policy_versions");
+  await s.client.execute("DELETE FROM outbox");
+  await s.client.execute(
+    "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
+    [GENESIS_HASH],
+  );
+  await runSeed(s.client);
+  const wallets = await listWallets();
+  s.events.emit("reset", wallets);
+  return wallets;
+}
+
+export function verifyLedger() {
+  const s = getStore();
+  return s.ready.then(() => verifyChain(s.client));
+}
+
+export async function recordOutbox(
+  walletId: string,
+  eventType: string,
+  payload: unknown,
+): Promise<OutboxEntry> {
+  const s = getStore();
+  await s.ready;
+  const entry: OutboxEntry = {
+    id: randomUUID(),
+    walletId,
+    eventType,
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+    createdAt: Date.now(),
+    attemptCount: 0,
+  };
+  await s.client.execute(
+    "INSERT INTO outbox (id, wallet_id, event_type, payload, created_at, attempt_count) VALUES (?, ?, ?, ?, ?, 0)",
+    [entry.id, walletId, eventType, entry.payload, entry.createdAt],
+  );
+  s.events.emit("alert", entry);
+  return entry;
+}
+
+export async function listOutbox(walletId?: string): Promise<OutboxEntry[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute(
+        "SELECT * FROM outbox WHERE wallet_id = ? ORDER BY created_at DESC LIMIT 200",
+        [walletId],
+      )
+    : await s.client.execute(
+        "SELECT * FROM outbox ORDER BY created_at DESC LIMIT 200",
+      );
+  return rows.map((r) => ({
+    id: r.id as string,
+    walletId: r.wallet_id as string,
+    eventType: r.event_type as string,
+    payload: r.payload as string,
+    createdAt: Number(r.created_at),
+    deliveredAt: r.delivered_at ? Number(r.delivered_at) : undefined,
+    attemptCount: Number(r.attempt_count),
+  }));
 }
 
 function rowToWallet(row: Record<string, unknown>): Wallet {
@@ -200,33 +506,160 @@ export async function createWallet(input: {
   );
   const wallet = await getWallet(input.id);
   if (!wallet) throw new Error("Failed to create wallet");
+  await createPolicyVersion(input.id, input.policy, "owner");
   s.events.emit("wallet", wallet);
   return wallet;
 }
 
-export async function updatePolicy(
-  id: string,
-  policy: Partial<WalletPolicy>,
-): Promise<Wallet | null> {
+export async function createPolicyVersion(
+  walletId: string,
+  policy: WalletPolicy,
+  createdBy: string,
+): Promise<PolicyVersion> {
   const s = getStore();
   await s.ready;
-  const wallet = await getWallet(id);
-  if (!wallet) return null;
-  const next: WalletPolicy = { ...wallet.policy, ...policy };
+  const now = Date.now();
+  const version: PolicyVersion = {
+    id: randomUUID(),
+    walletId,
+    policy,
+    policyHash: policyHash(policy),
+    createdBy,
+    effectiveAt: now + POLICY_TIMELOCK_MS,
+    createdAt: now,
+    status: "PENDING",
+  };
   await s.client.execute(
-    `UPDATE wallets SET max_per_tx = ?, daily_limit = ?, monthly_limit = ?, velocity_limit_per_min = ?, allowlist = ? WHERE id = ?`,
+    "INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')",
     [
-      next.maxPerTx,
-      next.dailyLimit,
-      next.monthlyLimit,
-      next.velocityLimitPerMin,
-      JSON.stringify(next.allowlist),
-      id,
+      version.id,
+      walletId,
+      JSON.stringify(policy),
+      version.policyHash,
+      createdBy,
+      version.effectiveAt,
+      now,
     ],
   );
-  const updated = await getWallet(id);
-  if (updated) s.events.emit("wallet", updated);
-  return updated;
+  s.events.emit("policy", version);
+  return version;
+}
+
+export async function getPendingPolicy(
+  walletId: string,
+): Promise<PolicyVersion | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM policy_versions WHERE wallet_id = ? AND status = 'PENDING' ORDER BY created_at DESC LIMIT 1",
+    [walletId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    walletId: row.wallet_id as string,
+    policy: JSON.parse(row.policy as string) as WalletPolicy,
+    policyHash: row.policy_hash as string,
+    createdBy: row.created_by as string,
+    effectiveAt: Number(row.effective_at),
+    createdAt: Number(row.created_at),
+    status: "PENDING",
+  };
+}
+
+export async function listPolicyVersions(walletId?: string): Promise<PolicyVersion[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute(
+        "SELECT * FROM policy_versions WHERE wallet_id = ? ORDER BY created_at DESC",
+        [walletId],
+      )
+    : await s.client.execute("SELECT * FROM policy_versions ORDER BY created_at DESC");
+  return rows.map((r) => ({
+    id: r.id as string,
+    walletId: r.wallet_id as string,
+    policy: JSON.parse(r.policy as string) as WalletPolicy,
+    policyHash: r.policy_hash as string,
+    createdBy: r.created_by as string,
+    effectiveAt: Number(r.effective_at),
+    createdAt: Number(r.created_at),
+    status: r.status as PolicyVersionStatus,
+  }));
+}
+
+/**
+ * Applies PENDING policy versions whose timelock has elapsed. Only the
+ * newest pending per wallet becomes effective; stale pendings are
+ * superseded. Deterministic by construction.
+ */
+export async function promoteDuePolicies(now = Date.now()): Promise<number> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM policy_versions WHERE status = 'PENDING' AND effective_at <= ? ORDER BY wallet_id ASC, created_at ASC",
+    [now],
+  );
+  // Newest PENDING per wallet wins (last write per wallet_id).
+  const newestByWallet = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    newestByWallet.set(row.wallet_id as string, row);
+  }
+
+  let promoted = 0;
+  for (const [walletId, row] of newestByWallet) {
+    const policy = JSON.parse(row.policy as string) as WalletPolicy;
+    await s.client.execute(
+      "UPDATE wallets SET max_per_tx = ?, daily_limit = ?, monthly_limit = ?, velocity_limit_per_min = ?, allowlist = ? WHERE id = ?",
+      [
+        policy.maxPerTx,
+        policy.dailyLimit,
+        policy.monthlyLimit,
+        policy.velocityLimitPerMin,
+        JSON.stringify(policy.allowlist),
+        walletId,
+      ],
+    );
+    await s.client.execute(
+      "UPDATE policy_versions SET status = 'ACTIVE' WHERE id = ?",
+      [row.id as string],
+    );
+    await s.client.execute(
+      "UPDATE policy_versions SET status = 'SUPERSEDED' WHERE wallet_id = ? AND id != ? AND status = 'PENDING'",
+      [walletId, row.id as string],
+    );
+    promoted += 1;
+    await addAudit({
+      walletId,
+      actor: "system",
+      action: "POLICY_ACTIVATED",
+      details: `Timelocked policy ${String(row.policy_hash).slice(0, 12)} became effective`,
+    });
+    const wallet = await getWallet(walletId);
+    if (wallet) s.events.emit("wallet", wallet);
+  }
+  return promoted;
+}
+
+/**
+ * Records a policy change as a timelocked version. Returns the current
+ * (still effective) wallet plus the pending version.
+ */
+export async function updatePolicy(
+  id: string,
+  partial: Partial<WalletPolicy>,
+  createdBy = "owner",
+): Promise<{ wallet: Wallet; pending: PolicyVersion } | null> {
+  const wallet = await getWallet(id);
+  if (!wallet) return null;
+  const next: WalletPolicy = { ...wallet.policy, ...partial };
+  const pending = await createPolicyVersion(id, next, createdBy);
+  if (POLICY_TIMELOCK_MS === 0) {
+    await promoteDuePolicies(Date.now() + 1);
+    return { wallet: (await getWallet(id))!, pending };
+  }
+  return { wallet, pending };
 }
 
 export async function setWalletStatus(
@@ -259,6 +692,11 @@ export async function setWalletStatus(
       }
     }
     s.events.emit("wallet", wallet);
+    await recordOutbox(
+      id,
+      status === "FROZEN" ? "WALLET_FROZEN" : "WALLET_UNFROZEN",
+      { status },
+    );
   }
   return wallet;
 }
@@ -270,6 +708,7 @@ export async function setWalletStatus(
 export async function settleDue(now = Date.now()): Promise<Transaction[]> {
   const s = getStore();
   await s.ready;
+  await promoteDuePolicies(now);
   const { rows } = await s.client.execute(
     "SELECT * FROM transactions WHERE status = 'PENDING' AND pending_until IS NOT NULL AND pending_until <= ?",
     [now],
@@ -312,18 +751,33 @@ export async function addAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
   const s = getStore();
   await s.ready;
   const id = randomUUID();
-  await s.client.execute(
-    "INSERT INTO audit (id, wallet_id, actor, action, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, entry.walletId, entry.actor, entry.action, entry.details, Date.now()],
+  const timestamp = Date.now();
+  await appendLedgerRow(
+    s.client,
+    "audit",
+    ["id", "wallet_id", "actor", "action", "details", "timestamp"],
+    [id, entry.walletId, entry.actor, entry.action, entry.details, timestamp],
+    auditContent({
+      walletId: entry.walletId,
+      actor: entry.actor,
+      action: entry.action,
+      details: entry.details,
+      timestamp,
+    }),
   );
-  s.events.emit("audit", {
+  const audit: AuditLogEntry = {
     id,
     walletId: entry.walletId,
     actor: entry.actor,
     action: entry.action,
     details: entry.details,
-    timestamp: Date.now(),
-  } satisfies AuditLogEntry);
+    timestamp,
+  };
+  s.events.emit("audit", audit);
+  await recordOutbox(entry.walletId, entry.action, {
+    details: entry.details,
+    auditId: id,
+  });
   return id;
 }
 
@@ -333,9 +787,10 @@ export async function createTransaction(
   const s = getStore();
   await s.ready;
   const id = randomUUID();
-  await s.client.execute(
-    `INSERT INTO transactions (id, wallet_id, "from", "to", amount, purpose, status, rejection_reason, requested_at, pending_until, settled_at, blocked_at, revoked_at, nonce)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  await appendLedgerRow(
+    s.client,
+    "transactions",
+    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
     [
       id,
       input.walletId,
@@ -352,9 +807,23 @@ export async function createTransaction(
       input.revokedAt ?? null,
       input.nonce,
     ],
+    txContent({
+      walletId: input.walletId,
+      from: input.from,
+      to: input.to,
+      amount: input.amount,
+      purpose: input.purpose,
+      nonce: input.nonce,
+      requestedAt: input.requestedAt,
+    }),
   );
   const tx = { ...input, id };
   s.events.emit("tx", tx);
+  await recordOutbox(
+    input.walletId,
+    input.status === "BLOCKED" ? "TX_BLOCKED" : "TX_REQUESTED",
+    { txId: id, to: input.to, amount: input.amount, status: input.status },
+  );
   return tx;
 }
 
@@ -440,6 +909,77 @@ export async function listAudit(walletId?: string): Promise<AuditLogEntry[]> {
       )
     : await s.client.execute("SELECT * FROM audit ORDER BY timestamp DESC");
   return rows.map((r) => rowToAudit(r as Record<string, unknown>));
+}
+
+export async function registerAgentKey(
+  walletId: string,
+  publicKey: string,
+  label: string,
+): Promise<AgentKeyRecord> {
+  const s = getStore();
+  await s.ready;
+  const record: AgentKeyRecord = {
+    walletId,
+    publicKey,
+    label,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    "INSERT INTO agent_keys (wallet_id, public_key, label, created_at) VALUES (?, ?, ?, ?)",
+    [walletId, publicKey, label, record.createdAt],
+  );
+  return record;
+}
+
+export async function getActiveAgentKey(
+  walletId: string,
+  publicKey: string,
+): Promise<AgentKeyRecord | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM agent_keys WHERE wallet_id = ? AND public_key = ? AND revoked_at IS NULL",
+    [walletId, publicKey],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    walletId: row.wallet_id as string,
+    publicKey: row.public_key as string,
+    label: row.label as string,
+    createdAt: Number(row.created_at),
+    revokedAt: row.revoked_at ? Number(row.revoked_at) : undefined,
+  };
+}
+
+export async function listAgentKeys(walletId?: string): Promise<AgentKeyRecord[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute(
+        "SELECT * FROM agent_keys WHERE wallet_id = ? ORDER BY created_at DESC",
+        [walletId],
+      )
+    : await s.client.execute("SELECT * FROM agent_keys ORDER BY created_at DESC");
+  return rows.map((r) => ({
+    walletId: r.wallet_id as string,
+    publicKey: r.public_key as string,
+    label: r.label as string,
+    createdAt: Number(r.created_at),
+    revokedAt: r.revoked_at ? Number(r.revoked_at) : undefined,
+  }));
+}
+
+export async function revokeAgentKey(
+  walletId: string,
+  publicKey: string,
+): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "UPDATE agent_keys SET revoked_at = ? WHERE wallet_id = ? AND public_key = ?",
+    [Date.now(), walletId, publicKey],
+  );
 }
 
 export { getStore };

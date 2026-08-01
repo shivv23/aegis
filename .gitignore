@@ -42,3 +42,6 @@ next-env.d.ts
 
 # runtime data (local libSQL ledger)
 /data/
+
+# internal planning docs (never pushed)
+/plan.md

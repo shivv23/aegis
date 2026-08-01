@@ -43,6 +43,10 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | In-flight revocation | Wallet | transactions hold in `PENDING` for a window; owner can revoke mid-flight |
 | Nonce replay protection | Rail | each transfer needs a unique nonce |
 | Audit trail | Ledger | append-only, actor-stamped (agent / owner / system) |
+| **Cryptographic agent identity** | Rail | agents sign transfers with an **Ed25519 keypair** (`x-aegis-*` headers); a stolen token is useless without the private key |
+| **Tamper-evident ledger** | Ledger | every row is **hash-chained** (`prev_hash`+`hash`+global `seq`); `GET /api/ledger/verify` proves integrity |
+| **Policy versioning + timelock** | Wallet | limit changes are recorded as versions and take effect after `AEGIS_POLICY_TIMELOCK_MS` |
+| **Ops alert outbox** | Wallet | every guard decision and wallet event is queued for delivery (SSE + future webhooks) |
 
 ## Stack
 
@@ -52,9 +56,11 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
   Runs on libSQL (SQLite) by default; point `AEGIS_DB_URL` at a Postgres
   connection string to scale — no code changes.
 - **Zod** — runtime validation at every API boundary
-- **jose (JWT/HMAC)** — scoped agent vs owner keys
+- **jose (JWT/HMAC)** — owner control-plane keys
+- **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
+- **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 25 tests incl. attack-resistance suite
+- **Vitest** — 39 tests incl. attack-resistance, signing, ledger, timelock suites
 
 ## Getting started
 
@@ -84,14 +90,17 @@ All endpoints require `Authorization: Bearer <key>`.
 |---|---|---|
 | `POST` | `/api/wallet` | Provision wallet + policy, returns agent & owner keys |
 | `GET` | `/api/wallet` | List wallets |
-| `GET`/`PATCH` | `/api/wallet/:id` | View / edit policy |
+| `GET`/`PATCH` | `/api/wallet/:id` | View / edit policy (timelocked) |
 | `POST` | `/api/wallet/:id/freeze` | **Engage kill switch** |
 | `POST` | `/api/wallet/:id/unfreeze` | Release kill switch |
 | `POST` | `/api/transactions/:id/revoke` | Revoke an in-flight transaction |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
-| `GET` | `/api/keys?walletId=` | Mint scoped keys |
+| `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys |
+| `POST` | `/api/keys/mint` | Mint an **Ed25519 agent keypair** (signed identity) |
+| `GET` | `/api/ledger/verify` | Prove the hash chain is intact |
+| `GET` | `/api/outbox` | Ops alert feed (guard decisions + wallet events) |
 | `POST` | `/api/admin/reset` | Reset demo data (demo mode) |
 | `GET` | `/api/bootstrap` | Demo: hands the UI the master owner key |
 
@@ -110,13 +119,23 @@ PENDING ── owner revokes / wallet frozen ──▶ REVOKED (IN_FLIGHT_REVOKE
 1. **Least privilege.** Agent keys carry `scope: agent` and a single wallet
    ID. They can only reach the rail. Owner keys (`scope: owner`) control
    policy, freeze, and revocation. The master owner key (`*`) manages all.
-2. **Guard is code, not data.** Policy *values* change at runtime; enforcement
+2. **Cryptographic agent identity.** Agents mint an Ed25519 keypair and sign
+   every transfer (`x-aegis-wallet`, `x-aegis-timestamp`, `x-aegis-signature`).
+   The rail verifies signature + freshness + replay nonce before the guard
+   runs. A stolen bearer token is useless without the private key.
+3. **Guard is code, not data.** Policy *values* change at runtime; enforcement
    *logic* cannot. There is no code path an agent can reach to weaken a rule.
-3. **Reservation on approval.** In-flight transfers count against limits
+4. **Reservation on approval.** In-flight transfers count against limits
    immediately, so splitting a payment under the per-tx cap can't beat the
    daily cap (covered by tests).
-4. **Replay protection.** Every transfer needs a fresh nonce.
-5. **Append-only ledger.** Nothing is edited, only transitioned; the state
+5. **Replay protection.** Every transfer needs a fresh nonce.
+6. **Tamper-evident ledger.** Every transaction and audit row is hash-chained
+   (SHA-256 over immutable content + previous hash). `GET /api/ledger/verify`
+   walks the chain and flags any edit, swap, or deletion.
+7. **Timelocked policy.** Policy changes are recorded as versions and only
+   become effective after `AEGIS_POLICY_TIMELOCK_MS` — a stolen owner key
+   can't instantly weaken the guard.
+8. **Append-only ledger.** Nothing is edited, only transitioned; the state
    machine rejects illegal transitions (`SETTLED → REVOKED` throws).
 
 ## Demo script (5 minutes)
@@ -141,25 +160,31 @@ src/
   core/            # enforcement heart (framework-free, fully tested)
     guard.ts       #   pure policy engine — the single choke point
     stateMachine.ts#   tx status transitions
-    keys.ts        #   scoped JWT signing/verification
-    store.ts       #   libSQL ledger + SSE event bus
-    seed.ts        #   demo data
-    guard.test.ts  #   25 tests incl. attack resistance
+    signing.ts     #   Ed25519 agent keypairs: sign/verify/canonical message
+    ledger.ts      #   SHA-256 hash chain: append, verify, rechain
+    keys.ts        #   owner JWT signing/verification
+    db.ts          #   libSQL / PostgreSQL adapter (env-var switch)
+    store.ts       #   ledger, outbox, policy versions, agent keys
+    seed.ts        #   demo constants
+    guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts
+    test-env.ts    #   in-memory DB env for tests
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
                    # Transactions, Audit, Agent Simulator
-  components/      # dashboard + simulator console
+  components/      # dashboard + simulator console + ledger badge
   hooks/use-stream.ts  # SSE client
-scripts/agent-sim.ts  # standalone CLI agent that attacks the real rail
+scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the real rail
 ```
 
 ## Environment
 
 | Variable | Default | Notes |
 |---|---|---|
-| `AEGIS_SECRET` | dev secret | HMAC secret for scoped keys — **set in prod** |
+| `AEGIS_SECRET` | dev secret | HMAC secret for owner keys — **set in prod** |
 | `AEGIS_DB_URL` | `file:./data/aegis.db` | libSQL file, a Turso `libsql://` URL, **or a `postgres://` URL** to run on PostgreSQL |
 | `AEGIS_HOLD_MS` | `5000` | in-flight revocation window |
+| `AEGIS_POLICY_TIMELOCK_MS` | `0` (demo) / `300000` (prod) | policy changes take effect after this delay |
+| `AEGIS_SIGNATURE_SKEW_MS` | `300000` | max age of a signed agent request |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set

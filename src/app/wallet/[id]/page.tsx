@@ -50,6 +50,11 @@ export default function WalletDetail({
   );
 
   const [keys, setKeys] = useState<{ agentKey: string; ownerKey: string } | null>(null);
+  const [keypair, setKeypair] = useState<{
+    publicKey: string;
+    privateKey: string;
+    label: string;
+  } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
 
@@ -103,6 +108,18 @@ export default function WalletDetail({
   async function mint() {
     const k = await mintKeys(id);
     setKeys({ agentKey: k.agentKey, ownerKey: k.walletOwnerKey });
+  }
+
+  async function mintKeypair() {
+    const kp = await ownerApi<{
+      publicKey: string;
+      privateKey: string;
+      label: string;
+    }>("/api/keys/mint", {
+      method: "POST",
+      body: JSON.stringify({ walletId: id, label: "agent-" + Date.now().toString(36) }),
+    });
+    setKeypair(kp);
   }
 
   async function revoke(tx: Transaction) {
@@ -279,6 +296,46 @@ export default function WalletDetail({
                 </span>
               </div>
             )}
+
+            <div className="mt-4 border-t border-border/60 pt-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-[11px] font-mono uppercase tracking-widest text-muted">
+                  Agent keypair (Ed25519)
+                </span>
+                <Button variant="outline" size="sm" onClick={mintKeypair}>
+                  {keypair ? "Re-mint keypair" : "Mint keypair"}
+                </Button>
+              </div>
+              {keypair ? (
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="text-[11px] font-mono text-info">AGENT PRIVATE KEY (secret)</span>
+                      <button onClick={() => copy(keypair.privateKey)} className="flex items-center gap-1 text-[11px] font-mono text-info hover:underline">
+                        {copied === keypair.privateKey ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />} copy
+                      </button>
+                    </div>
+                    <CodeBlock text={keypair.privateKey} />
+                    <p className="mt-1 text-[11px] text-warn">
+                      Shown once. The agent signs every transfer with it — a stolen token is useless without this key.
+                    </p>
+                  </div>
+                  <div>
+                    <div className="mb-1.5 text-[11px] font-mono text-muted">PUBLIC KEY (stored)</div>
+                    <CodeBlock text={keypair.publicKey} />
+                    <p className="mt-1 text-[11px] text-muted">
+                      Set AGENT_PRIVATE_KEY and run{" "}
+                      <code className="text-accent">npm run sim</code> to attack the rail with a signed identity.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[11px] text-muted">
+                  Sign-verified agent identity. The rail accepts
+                  Ed25519-signed transfers in <code className="text-accent">x-aegis-*</code> headers.
+                </div>
+              )}
+            </div>
           </Card>
         </div>
 

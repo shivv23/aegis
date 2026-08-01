@@ -27,7 +27,8 @@ export type RejectionReason =
   | "VELOCITY_EXCEEDED"
   | "INSUFFICIENT_FUNDS"
   | "IN_FLIGHT_REVOKED"
-  | "INVALID_SIGNATURE";
+  | "INVALID_SIGNATURE"
+  | "REQUEST_EXPIRED";
 
 export interface Transaction {
   id: string;
@@ -70,4 +71,58 @@ export interface TransferRequest {
   amount: number;
   purpose?: string;
   nonce: string;
+}
+
+/**
+ * A transfer the agent authorizes with its Ed25519 keypair instead of a
+ * bearer secret. The rail verifies the signature over the canonical message
+ * before the guard runs — the agent IS its key, and a stolen token is
+ * useless without the private key.
+ */
+export interface SignedTransferRequest {
+  walletId: string;
+  to: string;
+  amount: number;
+  purpose: string;
+  nonce: string;
+  requestedAt: number;
+}
+
+export interface AgentKeyRecord {
+  walletId: string;
+  publicKey: string;
+  label: string;
+  createdAt: number;
+  revokedAt?: number;
+}
+
+export type PolicyVersionStatus = "PENDING" | "ACTIVE" | "SUPERSEDED";
+
+export interface PolicyVersion {
+  id: string;
+  walletId: string;
+  policy: WalletPolicy;
+  policyHash: string;
+  createdBy: string;
+  effectiveAt: number;
+  createdAt: number;
+  status: PolicyVersionStatus;
+}
+
+export interface OutboxEntry {
+  id: string;
+  walletId: string;
+  eventType: string;
+  payload: string;
+  createdAt: number;
+  deliveredAt?: number;
+  attemptCount: number;
+}
+
+export interface LedgerProof {
+  intact: boolean;
+  rows: number;
+  checked: number;
+  brokenAt?: { seq: number; table: string; id: string };
+  headHash: string;
 }
