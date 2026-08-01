@@ -552,6 +552,25 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    // Backfill for databases seeded before the orgs feature existed: attach
+    // the seed wallet to the Acme Labs org. Skipped on fresh databases where
+    // runSeed() (which runs after migrations) creates both correctly.
+    version: 12,
+    name: "seed-org-backfill",
+    up: async (client) => {
+      const { rows } = await client.execute("SELECT COUNT(*) AS n FROM wallets");
+      if (Number(rows[0]?.n ?? 0) === 0) return;
+      await client.execute(
+        "INSERT OR IGNORE INTO orgs (id, name, created_at) VALUES (?, ?, ?)",
+        [SEED_ORG_ID, "Acme Labs", Date.now()],
+      );
+      await client.execute(
+        "UPDATE wallets SET org_id = ? WHERE id = ?",
+        [SEED_ORG_ID, SEED_WALLET_ID],
+      );
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
