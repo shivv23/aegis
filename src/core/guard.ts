@@ -4,6 +4,12 @@ export interface GuardContext {
   spentLast24h: number;
   spentLast30d: number;
   txCountLastMin: number;
+  /** Timestamp used for the spending-window check. */
+  now: number;
+  /** Optional region claim from the request (e.g. "us-east") for geo policy. */
+  region?: string;
+  /** Optional spend already consumed by the wallet's budget group this period. */
+  groupSpent?: number;
 }
 
 export interface GuardResult {
@@ -98,6 +104,80 @@ export function checkVelocity(
 }
 
 /**
+ * Time constraint: when spendingWindows are configured, the request's UTC hour
+ * must fall inside at least one window. A window that wraps midnight
+ * (startHour > endHour) is treated as crossing into the next day.
+ */
+export function checkSpendingWindow(
+  wallet: Wallet,
+  now: number,
+): GuardResult {
+  const windows = wallet.policy.spendingWindows;
+  if (!windows || windows.length === 0) return ok();
+
+  const hour = new Date(now).getUTCHours();
+  const inside = windows.some((w) => {
+    if (w.startHour <= w.endHour) return hour >= w.startHour && hour <= w.endHour;
+    return hour >= w.startHour || hour <= w.endHour;
+  });
+  if (!inside) {
+    const desc = windows.map((w) => `${w.startHour}:00–${w.endHour}:00Z`).join(", ");
+    return deny(
+      "OUTSIDE_SPENDING_WINDOW",
+      `Current UTC hour ${hour} is outside allowed spending window(s): ${desc}`,
+    );
+  }
+  return ok();
+}
+
+/** Geo constraint: a region claim must be in the policy's regionAllowlist. */
+export function checkRegion(
+  wallet: Wallet,
+  region: string | undefined,
+): GuardResult {
+  const allowed = wallet.policy.regionAllowlist;
+  if (!allowed || allowed.length === 0) return ok();
+  if (!region) {
+    return deny("REGION_BLOCKED", "Region claim required by policy region allowlist");
+  }
+  if (!allowed.includes(region)) {
+    return deny(
+      "REGION_BLOCKED",
+      `Region '${region}' is not in the policy allowlist`,
+    );
+  }
+  return ok();
+}
+
+/** Counterparty reputation: blocked counterparties never clear the guard. */
+export function checkCounterparty(
+  status: string | undefined,
+  to: string,
+): GuardResult {
+  if (status === "BLOCKED") {
+    return deny("COUNTERPARTY_BLOCKED", `Counterparty ${to} is blocked by the registry`);
+  }
+  return ok();
+}
+
+/** Budget group: cross-wallet spend is capped at the group level. */
+export function checkGroupBudget(
+  groupLimit: number | undefined,
+  groupSpent: number | undefined,
+  amount: number,
+): GuardResult {
+  if (groupLimit !== undefined && groupSpent !== undefined) {
+    if (groupSpent + amount > groupLimit) {
+      return deny(
+        "GROUP_LIMIT_EXCEEDED",
+        `Budget group spend ${groupSpent} + ${amount} exceeds group limit ${groupLimit}`,
+      );
+    }
+  }
+  return ok();
+}
+
+/**
  * The full guard chain. Runs every policy check in order and returns
  * the first violation. This is the single choke point through which all
  * money movement must pass. It is pure and deterministic by design.
@@ -107,14 +187,22 @@ export function runGuard(
   amount: number,
   to: string,
   context: GuardContext,
+  extra?: {
+    counterpartyStatus?: string;
+    groupLimit?: number;
+  },
 ): GuardResult {
   const checks: GuardResult[] = [
     checkFreeze(wallet),
     checkPerTxLimit(wallet, amount),
     checkAllowlist(wallet, to),
+    checkSpendingWindow(wallet, context.now ?? Date.now()),
+    checkRegion(wallet, context.region),
+    checkCounterparty(extra?.counterpartyStatus, to),
     checkFunds(wallet, amount),
     checkDailyLimit(wallet, amount, context.spentLast24h),
     checkMonthlyLimit(wallet, amount, context.spentLast30d),
+    checkGroupBudget(extra?.groupLimit, context.groupSpent, amount),
     checkVelocity(wallet, context.txCountLastMin),
   ];
 
@@ -158,5 +246,5 @@ export function spendContext(
     (t) => now - when(t) < minuteMs,
   ).length;
 
-  return { spentLast24h, spentLast30d, txCountLastMin };
+  return { spentLast24h, spentLast30d, txCountLastMin, now };
 }

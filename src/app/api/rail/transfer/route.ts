@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
-import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, getWallet, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue } from "@/core/store";
+import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, getBudgetGroupForWallet, getCounterparty, getWallet, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
 
@@ -39,6 +39,10 @@ export async function POST(req: NextRequest) {
     }
     const agentKey = (await listAgentKeys(walletId)).find((k) => !k.revokedAt);
     if (!agentKey) return error("No active agent key for wallet", 401);
+    if (agentKey.expiresAt && agentKey.expiresAt < now) {
+      return error("Agent key expired", 401);
+    }
+    await touchAgentKey(walletId, agentKey.publicKey);
 
     const verdict = validateSignedTransfer(
       { walletId, to, amount, purpose, nonce, requestedAt },
@@ -58,7 +62,7 @@ export async function POST(req: NextRequest) {
         401,
       );
     }
-    return executeTransfer({ walletId, to, amount, purpose, nonce, now });
+    return executeTransfer({ walletId, to, amount, purpose, nonce, now, region: req.headers.get("x-aegis-region") ?? undefined });
   }
 
   // Path B — legacy scoped agent JWT (migration compatibility).
@@ -72,6 +76,7 @@ export async function POST(req: NextRequest) {
     purpose,
     nonce,
     now,
+    region: req.headers.get("x-aegis-region") ?? undefined,
   });
 }
 
@@ -82,8 +87,9 @@ async function executeTransfer(input: {
   purpose: string;
   nonce: string;
   now: number;
+  region?: string;
 }) {
-  const { walletId, to, amount, purpose, nonce, now } = input;
+  const { walletId, to, amount, purpose, nonce, now, region } = input;
 
   if (!(await consumeNonce(nonce))) {
     return error("Replay detected: nonce already used", 409);
@@ -96,7 +102,15 @@ async function executeTransfer(input: {
   const history = await listTransactions(wallet.id);
   const context = spendContext(wallet.id, now, history);
 
-  const verdict = runGuard(wallet, amount, to, context);
+  // Counterparty reputation + budget group enforcement.
+  const counterparty = await getCounterparty(to);
+  const group = await getBudgetGroupForWallet(wallet.id);
+  const groupSpent = group ? await groupSpendLast30d(group, now) : undefined;
+
+  const verdict = runGuard(wallet, amount, to, { ...context, region, groupSpent }, {
+    counterpartyStatus: counterparty?.status,
+    groupLimit: group?.monthlyLimit,
+  });
 
   if (!verdict.allowed) {
     const tx = await createTransaction({

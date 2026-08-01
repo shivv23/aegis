@@ -139,14 +139,15 @@ export default function WhitepaperPage() {
         </h2>
         <Card className="p-4">
           <p className="text-sm text-zinc-400">
-            88 unit/integration tests across 12 suites (policy guard, attack-resistance, Ed25519 signing, hash-chain
+            131 unit/integration tests across 17 suites (policy guard, attack-resistance, Ed25519 signing, hash-chain
             ledger, policy timelock, risk scoring, step-up, what-if simulator, rails, multi-sig, orgs, on-chain
-            mirror) — plus 10 Hardhat tests for the on-chain Guardian. Every defense in the matrix above has a named
-            test proving it, including the limit-split attack, replay rejection, freeze-bypass attempts, and ledger
-            tamper detection.
+            mirror, counterparties, budget groups, escrows, usage, multi-currency, regulator export, key lifecycle,
+            LLM classifier) — including property-based fuzzing of the guard (fast-check) — plus 10 Hardhat tests for
+            the on-chain Guardian. Every defense in the matrix above has a named test proving it, including the
+            limit-split attack, replay rejection, freeze-bypass attempts, and ledger tamper detection.
           </p>
           <p className="mt-3 font-mono text-xs text-emerald-300">
-            $ npm test &nbsp;→&nbsp; 12 files, 88 passed &nbsp;·&nbsp; $ cd contracts &amp;&amp; npx hardhat test &nbsp;→&nbsp; 10 passed
+            $ npm test &nbsp;→&nbsp; 17 files, 131 passed &nbsp;·&nbsp; $ cd contracts &amp;&amp; npx hardhat test &nbsp;→&nbsp; 10 passed
           </p>
         </Card>
       </section>
@@ -172,6 +173,34 @@ export default function WhitepaperPage() {
             JSON) against the on-chain seal and reports <code className="font-mono text-xs text-emerald-300">matches: true</code>
             only when they are byte-identical. The Guardian&apos;s <code className="font-mono text-xs">revoke()</code> is
             one-way — no agent and no stolen key can un-freeze it.
+          </p>
+        </Card>
+      </section>
+
+      <section>
+        <h2 className="mb-3 flex items-center gap-2 font-mono text-sm font-semibold text-zinc-200">
+          <ShieldCheck size={15} className="text-emerald-400" /> Identity &amp; account abstraction — the road ahead
+        </h2>
+        <Card className="p-4 text-sm text-zinc-400">
+          <p>
+            <strong className="text-zinc-200">DPKI / DID framing.</strong> Today an agent identity is an Ed25519
+            keypair held in the AEGIS keystore; the wallet&apos;s <code className="font-mono text-xs">ownerDid</code> is
+            a DID string (e.g. <code className="font-mono text-xs">did:org:acme</code>). AEGIS is a natural fit for a
+            DPKI (<em>decentralized</em> PKI) layer: agent public keys are registered on-chain in a key registry,
+            rotated out by owner- or multi-sig-signed DID Documents, and resolved at transfer time — so a stolen key
+            dies the moment its DID Document entry is rotated, even if the attacker holds the private key. This is
+            the same write-once, revoke-many semantics the wallet already applies to the kill switch.
+          </p>
+          <p className="mt-3">
+            <strong className="text-zinc-200">ERC-4337 / account abstraction framing.</strong> ERC-4337 replaces
+            externally-owned accounts with <em>smart contract accounts</em> governed by a policy; AEGIS is the policy
+            engine that sits in front of that contract. The on-chain <code className="font-mono text-xs">Guardian.sol</code>
+            already enforces per-tx / daily / velocity caps and a one-way <code className="font-mono text-xs">revoke()</code> —
+            the exact constraint set a 4337 <code className="font-mono text-xs">validateUserOp</code> would need. An
+            agent&apos;s scoped key becomes a 4337 <em>signer</em>: it can originate <code className="font-mono text-xs">UserOperation</code>s,
+            but every operation is subject to the guard&apos;s checks and the owner&apos;s kill switch, with no trust placed
+            in the agent. Bundlers never see an unchecked transfer, because the guard is enforced at wallet layer
+            before an op is ever submitted.
           </p>
         </Card>
       </section>

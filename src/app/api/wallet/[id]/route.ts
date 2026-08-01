@@ -35,6 +35,10 @@ const patchSchema = z.object({
   monthlyLimit: z.number().positive().optional(),
   velocityLimitPerMin: z.number().int().positive().optional(),
   allowlist: z.array(z.string().min(1)).optional(),
+  spendingWindows: z
+    .array(z.object({ startHour: z.number().int().min(0).max(23), endHour: z.number().int().min(0).max(23) }))
+    .optional(),
+  regionAllowlist: z.array(z.string().min(1)).optional(),
 });
 
 export async function PATCH(

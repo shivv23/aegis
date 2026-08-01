@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { agentKeyFor, masterOwnerKey, signKey } from "@/core/keys";
+import { listAgentKeys } from "@/core/store";
 
 export const runtime = "nodejs";
 
@@ -18,5 +19,6 @@ export async function GET(req: NextRequest) {
     ownerKey: await masterOwnerKey(),
     walletOwnerKey: await signKey(walletId, OWNER),
     agentKey: await agentKeyFor(walletId),
+    agentKeys: await listAgentKeys(walletId),
   });
 }

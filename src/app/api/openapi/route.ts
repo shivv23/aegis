@@ -81,9 +81,40 @@ const spec = {
       post: { summary: "Owner decision on a high-risk transfer (approve/decline)." },
     },
     "/api/transactions/stream": { get: { summary: "SSE live feed." } },
-    "/api/keys": { get: { summary: "Mint scoped owner/agent JWT keys (master key)." } },
+    "/api/keys": { get: { summary: "Mint scoped owner/agent JWT keys (master key), or list agent keys + lifecycle for a wallet." } },
     "/api/keys/mint": {
       post: { summary: "Mint an Ed25519 agent keypair — the agent's identity." },
+    },
+    "/api/keys/revoke": {
+      post: { summary: "Revoke an agent Ed25519 public key (rotates it out of the allowlist)." },
+    },
+    "/api/keys/rotate": {
+      post: { summary: "Rotate: revoke the old key, mint a fresh keypair, return the new private key." },
+    },
+    "/api/counterparties": {
+      get: { summary: "List counterparty registry (reputation, totals, flags)." },
+      post: { summary: "Upsert a counterparty (ACTIVE/FLAGGED/BLOCKED); BLOCKED stops all transfers to it." },
+    },
+    "/api/budget-groups": {
+      get: { summary: "List budget groups; ?walletId resolves the group for a wallet." },
+      post: { summary: "Create a cross-wallet budget group with a monthly cap." },
+    },
+    "/api/escrows": {
+      get: { summary: "List escrows; ?walletId filters." },
+      post: { summary: "Create an escrow — funds are debited and held until a condition releases them." },
+      patch: { summary: "PATCH ?id=<escrowId>&action=release|refund — settle or return the held funds." },
+    },
+    "/api/usage": {
+      get: { summary: "Usage metering per wallet (rows, totals, per-rail breakdown)." },
+    },
+    "/api/currencies": {
+      get: { summary: "Supported display currencies (USD, USDC, EUR, INR, ETH)." },
+    },
+    "/api/export": {
+      get: {
+        summary: "Regulator export pack.",
+        description: "?kind=audit.csv | auditlog.csv | audit.json (flat pack) | report (SAR-lite monthly JSON).",
+      },
     },
     "/api/ledger/verify": { get: { summary: "Prove the hash chain is intact." } },
     "/api/audit": { get: { summary: "Audit trail." } },

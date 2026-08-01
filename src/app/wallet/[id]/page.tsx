@@ -13,6 +13,7 @@ import {
 } from "@/components/ui";
 import { LiveFeed } from "@/components/live-feed";
 import { SimulatorConsole } from "@/components/simulator-console";
+import { KeyLifecycle } from "@/components/key-lifecycle";
 import { mintKeys, ownerApi } from "@/lib/api-client";
 import { clock, shortId } from "@/lib/utils";
 import {
@@ -346,6 +347,8 @@ export default function WalletDetail({
               )}
             </div>
           </Card>
+
+          <KeyLifecycle walletId={wallet.id} />
         </div>
 
         <div className="space-y-6">

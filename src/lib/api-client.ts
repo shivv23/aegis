@@ -97,6 +97,34 @@ export async function mintKeys(walletId: string) {
   );
 }
 
+export async function listAgentKeys(walletId: string) {
+  return ownerApi<{
+    agentKeys: Array<{
+      publicKey: string;
+      label: string;
+      createdAt: number;
+      expiresAt: number | null;
+      lastUsedAt: number | null;
+      revokedAt: number | null;
+      acl?: { actions: string[] };
+    }>;
+  }>(`/api/keys?walletId=${encodeURIComponent(walletId)}`);
+}
+
+export async function rotateAgentKey(walletId: string, oldPublicKey: string) {
+  return ownerApi<{ publicKey: string; privateKey: string; label: string }>(
+    "/api/keys/rotate",
+    { method: "POST", body: JSON.stringify({ walletId, oldPublicKey }) },
+  );
+}
+
+export async function revokeAgentKey(walletId: string, publicKey: string) {
+  return ownerApi<{ ok: boolean }>("/api/keys/revoke", {
+    method: "POST",
+    body: JSON.stringify({ walletId, publicKey }),
+  });
+}
+
 export async function createWallet(input: {
   name: string;
   ownerDid: string;

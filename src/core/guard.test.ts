@@ -29,7 +29,7 @@ const baseWallet: Wallet = {
   createdAt: 0,
 };
 
-const emptyCtx = { spentLast24h: 0, spentLast30d: 0, txCountLastMin: 0 };
+const emptyCtx = { spentLast24h: 0, spentLast30d: 0, txCountLastMin: 0, now: Date.now() };
 
 function settle(walletId: string, amount: number, ageMs: number): Transaction {
   return {

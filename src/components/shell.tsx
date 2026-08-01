@@ -1,6 +1,13 @@
+"use client";
+
+import { usePathname } from "next/navigation";
 import { Sidebar } from "./sidebar";
 
 export function Shell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  if (pathname === "/home") {
+    return <main className="min-h-screen">{children}</main>;
+  }
   return (
     <div className="flex min-h-screen">
       <Sidebar />

@@ -1,11 +1,22 @@
 export type WalletStatus = "ACTIVE" | "FROZEN";
 
+export interface SpendingWindow {
+  /** UTC hour the window opens (0–23). */
+  startHour: number;
+  /** UTC hour the window closes (0–23). A window crossing midnight is allowed. */
+  endHour: number;
+}
+
 export interface WalletPolicy {
   maxPerTx: number;
   dailyLimit: number;
   monthlyLimit: number;
   velocityLimitPerMin: number;
   allowlist: string[];
+  /** Optional: only these UTC hours may spend. Empty/undefined = always allowed. */
+  spendingWindows?: SpendingWindow[];
+  /** Optional: allowed agent regions (e.g. "us-east", "eu-west"). Empty = unrestricted. */
+  regionAllowlist?: string[];
 }
 
 export interface Wallet {
@@ -24,6 +35,74 @@ export interface Organization {
   id: string;
   name: string;
   createdAt: number;
+}
+
+export type CounterpartyStatus = "ACTIVE" | "FLAGGED" | "BLOCKED";
+
+export interface Counterparty {
+  id: string;
+  name: string;
+  address: string;
+  orgId?: string;
+  status: CounterpartyStatus;
+  flags: string[];
+  totalPaid: number;
+  totalTx: number;
+  createdAt: number;
+}
+
+export interface BudgetGroup {
+  id: string;
+  orgId?: string;
+  name: string;
+  monthlyLimit: number;
+  walletIds: string[];
+  createdAt: number;
+}
+
+export type EscrowStatus = "HELD" | "RELEASED" | "REFUNDED" | "EXPIRED";
+
+export interface Escrow {
+  id: string;
+  walletId: string;
+  from: string;
+  to: string;
+  amount: number;
+  condition: string;
+  status: EscrowStatus;
+  createdAt: number;
+  heldUntil?: number;
+  releasedAt?: number;
+  refundedAt?: number;
+}
+
+export interface UsageRecord {
+  id: string;
+  walletId: string;
+  orgId?: string;
+  txId: string;
+  amount: number;
+  rail: string;
+  createdAt: number;
+}
+
+export interface KeyAcl {
+  scope: Scope;
+  role: string;
+  walletId: string;
+  orgId?: string;
+  /** Optional per-key ACL actions granted beyond the role default. */
+  actions?: string[];
+}
+
+export type CurrencyCode = "USD" | "USDC" | "EUR" | "INR" | "ETH";
+
+export interface CurrencyMeta {
+  code: CurrencyCode;
+  symbol: string;
+  /** USD notional exchange rate used for multi-currency display. */
+  usdRate: number;
+  decimals: number;
 }
 
 export type TxStatus =
@@ -45,7 +124,11 @@ export type RejectionReason =
   | "RISK_REJECTED"
   | "STEP_UP_DECLINED"
   | "STEP_UP_EXPIRED"
-  | "RAIL_FAILED";
+  | "RAIL_FAILED"
+  | "OUTSIDE_SPENDING_WINDOW"
+  | "REGION_BLOCKED"
+  | "COUNTERPARTY_BLOCKED"
+  | "GROUP_LIMIT_EXCEEDED";
 
 export interface Transaction {
   id: string;
@@ -116,7 +199,10 @@ export interface AgentKeyRecord {
   publicKey: string;
   label: string;
   createdAt: number;
+  expiresAt?: number;
   revokedAt?: number;
+  lastUsedAt?: number;
+  acl?: KeyAcl;
 }
 
 export type PolicyVersionStatus = "PENDING" | "ACTIVE" | "SUPERSEDED";

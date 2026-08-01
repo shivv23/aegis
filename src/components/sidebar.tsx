@@ -15,9 +15,11 @@ import {
   BookOpen,
   FileText,
   BarChart3,
+  Home,
 } from "lucide-react";
 
 const links = [
+  { href: "/home", label: "Home", icon: Home },
   { href: "/", label: "Command Center", icon: LayoutDashboard },
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/audit", label: "Audit Trail", icon: ScrollText },

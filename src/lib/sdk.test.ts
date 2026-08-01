@@ -107,4 +107,35 @@ describe("Aegis SDK", () => {
     expect(r.status).toBe(403);
     expect(r.body.reason).toBe("NOT_ALLOWLISTED");
   });
+
+  it("exposes the new control-plane endpoints", async () => {
+    const fetchMock = mockFetch(200, { escrows: [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const aegis = new Aegis({ apiKey: "jwt" });
+
+    await aegis.listCounterparties();
+    await aegis.upsertCounterparty({ name: "Vendor", address: "vendor:a", flags: ["HIGH_RISK"] });
+    await aegis.listBudgetGroups("wallet-1");
+    await aegis.createBudgetGroup({ name: "Eng", monthlyLimit: 2000, walletIds: ["wallet-1"] });
+    await aegis.createEscrow({ walletId: "wallet-1", to: "vendor:a", amount: 50, condition: "invoice" });
+    await aegis.releaseEscrow("esc-1");
+    await aegis.refundEscrow("esc-2");
+    await aegis.usage("wallet-1");
+    await aegis.currencies();
+    await aegis.exportAuditCsv();
+    await aegis.sarReport();
+    await aegis.listAgentKeys("wallet-1");
+    await aegis.revokeAgentKey("wallet-1", "pub-1");
+    await aegis.rotateAgentKey("wallet-1", "pub-1");
+
+    const paths = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(paths).toContain("/api/counterparties");
+    expect(paths).toContain("/api/budget-groups?walletId=wallet-1");
+    expect(paths).toContain("/api/escrows?id=esc-1");
+    expect(paths).toContain("/api/usage?walletId=wallet-1");
+    expect(paths).toContain("/api/export?kind=report");
+    expect(paths).toContain("/api/keys/revoke");
+    expect(paths).toContain("/api/keys/rotate");
+  });
 });

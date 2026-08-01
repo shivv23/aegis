@@ -66,6 +66,16 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Pluggable settlement rails** | Rail | settlement routes through a rail plugin (`sandbox` / `usdc-testnet` / `ach-lite`) — the guard never changes |
 | **2-of-3 multi-sig owners** | Keys | owner control-plane keys are only minted after 2 distinct signers approve |
 | **Multi-tenant orgs** | Keys | orgs with per-org wallets, org-scoped owner keys and auth on wallet routes |
+| **Spending windows + geo** | Guard | policy can restrict transfers to UTC hours (`spendingWindows`) and to approved regions (`regionAllowlist`); a `x-aegis-region` header carries the region claim |
+| **Counterparty registry** | Guard | counterparties carry status/flags/reputation; `BLOCKED` counterparties are rejected before any other check |
+| **Budget groups** | Guard | cross-wallet monthly caps — the whole fleet is bound by one org budget, not just a single wallet |
+| **Conditional escrows** | Wallet | funds are debited into an escrow and released only when a condition is met (or refunded back) |
+| **Usage metering** | Wallet | per-wallet usage rows + totals and per-rail breakdown for billing |
+| **Multi-currency display** | Ledger | render any balance/amount in USD, USDC, EUR, INR, or ETH (single-unit ledger truth) |
+| **Regulator export** | Export | one-click audit pack (`audit.csv`, `auditlog.csv`, `audit.json`) + a SAR-lite monthly report flagging counterparty anomalies |
+| **Agent key lifecycle** | Keys | list, rotate, revoke, expire, and ACL agent keys — a rotated key dies the moment the owner rotates it |
+| **LLM intent classifier** | Rail | optional (`AEGIS_LLM_URL`) classification of the `purpose` field; deterministic heuristic fallback, never gates a transfer |
+| **Push alert webhooks** | Wallet | every outbox event is POSTed to `AEGIS_WEBHOOK_URL` (HMAC-signed with `AEGIS_WEBHOOK_SECRET`) |
 | **What-if policy simulator** | Sim | replay a wallet's real history against a hypothetical policy and see every would-be block |
 | **On-chain mirror** | Chain | `Guardian.sol` runs the same checks; `PolicyRegistry.sol` seals the active policy hash (live on Sepolia, verified `matches: true`) |
 
@@ -81,7 +91,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 88 tests across 12 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror
+- **Vitest** — 131 tests across 17 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror, counterparties, budget groups, escrows, usage, multi-currency, export, key lifecycle, LLM classifier, and property-based fuzzing of the guard (fast-check)
 - **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green; live on Sepolia
 
 ## Getting started
@@ -126,16 +136,21 @@ const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: 
   bearer token is worthless without the private key.
 - Also exposes `mintAgentKey`, `scopedKeys`, `createWallet`, `freeze`,
   `unfreeze`, `patchPolicy`, `revoke`, `stepUp`, `verifyLedger`, `rails`,
-  `guardian`, `breaker`, multi-sig signer/approval flows, and **multi-tenant
-  orgs** (`createOrg`, `listOrgs`, `getOrg`, `listOrgWallets`) — see
-  `src/lib/sdk.ts` (+ `sdk.test.ts`, 5 tests).
+  `guardian`, `breaker`, multi-sig signer/approval flows, **multi-tenant
+  orgs** (`createOrg`, `listOrgs`, `getOrg`), **counterparties**,
+  **budget groups**, **escrows** (`createEscrow`, `releaseEscrow`,
+  `refundEscrow`), **usage**, **currencies**, **regulator export**
+  (`exportAuditCsv`, `sarReport`), and **key lifecycle** (`listAgentKeys`,
+  `revokeAgentKey`, `rotateAgentKey`) — see `src/lib/sdk.ts`
+  (+ `sdk.test.ts`).
 - A **Python SDK** (`python/aegis/sdk.py`) mirrors the TypeScript API for
-  agent stacks in Python — `python/tests/test_sdk.py` (6 tests),
+  agent stacks in Python — `python/tests/test_sdk.py`,
   `python/examples/agent_demo.py` (hostile-agent demo).
 - `scripts/agent-sim.ts` runs the hostile-agent demo through the SDK.
 
 ## Product pages
 
+- **Home** (`/home`) — marketing landing: product, pricing, proof
 - **Command Center** (`/`) — live SSE feed, kill switch, wallet registry
 - **Agent Simulator** (`/simulator`) — hostile-agent attack presets against the real rail
 - **Policy Sandbox** (`/sandbox`) — one-click what-if scenarios
@@ -176,8 +191,16 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
-| `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys |
+| `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys + list agent keys (lifecycle) |
 | `POST` | `/api/keys/mint` | Mint an **Ed25519 agent keypair** (signed identity) |
+| `POST` | `/api/keys/revoke` | Revoke an agent Ed25519 public key |
+| `POST` | `/api/keys/rotate` | Rotate: revoke old key + return a fresh keypair |
+| `GET/POST` | `/api/counterparties` | List / upsert counterparty registry (BLOCKED stops transfers) |
+| `GET/POST` | `/api/budget-groups` | List (`?walletId=` resolves group) / create cross-wallet budget groups |
+| `GET/POST/PATCH` | `/api/escrows` | List / create escrow / release or refund (`?id=&action=release\|refund`) |
+| `GET` | `/api/usage` | Usage metering: rows, totals, per-rail breakdown |
+| `GET` | `/api/currencies` | Supported display currencies |
+| `GET` | `/api/export` | Regulator pack: `?kind=audit.csv \| auditlog.csv \| audit.json \| report` |
 | `GET` | `/api/ledger/verify` | Prove the hash chain is intact |
 | `GET` | `/api/outbox` | Ops alert feed (guard decisions + wallet events) |
 | `POST` | `/api/admin/reset` | Reset demo data (demo mode) |
@@ -258,17 +281,24 @@ src/
     ledger.ts      #   SHA-256 hash chain: append, verify, rechain
     keys.ts        #   owner JWT signing/verification
     db.ts          #   libSQL / PostgreSQL adapter (env-var switch)
-    store.ts       #   ledger, outbox, policy versions, agent keys, breaker
+    store.ts       #   ledger, outbox, policy versions, agent keys, breaker,
+                   #   counterparties, budget groups, escrows, usage
+    currency.ts    #   multi-currency display (USD/USDC/EUR/INR/ETH)
+    classify.ts    #   LLM intent classifier + heuristic fallback
+    push.ts        #   webhook push-alert delivery
+    export.ts      #   regulator audit pack + SAR-lite report
     seed.ts        #   demo constants
     guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
     risk.test.ts / stepup.test.ts / simulate.test.ts / rails.test.ts /
-    multisig.test.ts / orgs.test.ts / chain.test.ts
+    multisig.test.ts / orgs.test.ts / chain.test.ts / features.test.ts /
+    guard-extensions.test.ts / currency.test.ts / export.test.ts /
+    classify.test.ts
     test-env.ts    #   in-memory DB env for tests
   core/chain.ts    #   raw JSON-RPC reader of the deployed Guardian/PolicyRegistry
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
                    # Transactions, Audit, Agent Simulator
-  components/      # dashboard + simulator console + ledger badge
+  components/      # dashboard + simulator console + ledger badge + key lifecycle
   hooks/use-stream.ts  # SSE client
   app/multisig/     # 2-of-3 signer approval console
   app/sandbox/      # public playground with one-click attack scenarios
@@ -276,6 +306,7 @@ src/
   app/analytics/    # guard telemetry console
   app/docs/         # OpenAPI docs
   app/whitepaper/   # security whitepaper (threat model + attack matrix + tests)
+  app/(marketing)/home/  # landing + marketing site (pricing)
   contracts/        # Hardhat: Guardian.sol + PolicyRegistry.sol (on-chain mirror)
   contracts/deployments/sepolia.json  # live deployment artifact (git-ignored)
 scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the real rail
@@ -304,6 +335,10 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
 | `AEGIS_DEPLOYER_KEY` | unset | funded Sepolia private key for `hardhat run --network sepolia` |
 | `AEGIS_ETHERSCAN_KEY` | unset | optional; enables contract verification on Sepolia |
+| `AEGIS_WEBHOOK_URL` | unset | ops push-alert webhook: every outbox event is POSTed here |
+| `AEGIS_WEBHOOK_SECRET` | unset | HMAC secret for `X-AEGIS-Signature` on webhook payloads |
+| `AEGIS_LLM_URL` | unset | optional LLM endpoint for intent classification of `purpose` |
+| `AEGIS_LLM_MODEL` | `default` | model id sent to the LLM endpoint |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set
 `AEGIS_DB_URL=postgres://user:pass@host:5432/db` and the ledger runs on

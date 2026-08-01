@@ -208,6 +208,108 @@ export class Aegis {
     return this.request("/api/simulate", { method: "POST", body: input });
   }
 
+  // ---- counterparties ----------------------------------------------------------
+
+  listCounterparties(): Promise<AegisResponse> {
+    return this.request("/api/counterparties");
+  }
+
+  upsertCounterparty(input: {
+    name: string;
+    address: string;
+    status?: "ACTIVE" | "FLAGGED" | "BLOCKED";
+    flags?: string[];
+    notes?: string;
+  }): Promise<AegisResponse> {
+    return this.request("/api/counterparties", { method: "POST", body: input });
+  }
+
+  // ---- budget groups ------------------------------------------------------------
+
+  listBudgetGroups(walletId?: string): Promise<AegisResponse> {
+    return this.request(
+      walletId ? `/api/budget-groups?walletId=${encodeURIComponent(walletId)}` : "/api/budget-groups",
+    );
+  }
+
+  createBudgetGroup(input: { name: string; monthlyLimit: number; walletIds?: string[] }): Promise<AegisResponse> {
+    return this.request("/api/budget-groups", { method: "POST", body: input });
+  }
+
+  // ---- escrows -------------------------------------------------------------------
+
+  listEscrows(walletId?: string): Promise<AegisResponse> {
+    return this.request(
+      walletId ? `/api/escrows?walletId=${encodeURIComponent(walletId)}` : "/api/escrows",
+    );
+  }
+
+  createEscrow(input: {
+    walletId: string;
+    to: string;
+    amount: number;
+    condition: string;
+    expiresAt?: number;
+  }): Promise<AegisResponse> {
+    return this.request("/api/escrows", { method: "POST", body: input });
+  }
+
+  releaseEscrow(id: string): Promise<AegisResponse> {
+    return this.request(`/api/escrows?id=${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { action: "release" },
+    });
+  }
+
+  refundEscrow(id: string): Promise<AegisResponse> {
+    return this.request(`/api/escrows?id=${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { action: "refund" },
+    });
+  }
+
+  // ---- usage + multi-currency -----------------------------------------------------
+
+  usage(walletId?: string): Promise<AegisResponse> {
+    return this.request(walletId ? `/api/usage?walletId=${encodeURIComponent(walletId)}` : "/api/usage");
+  }
+
+  currencies(): Promise<AegisResponse> {
+    return this.request("/api/currencies");
+  }
+
+  // ---- regulator export -------------------------------------------------------------
+
+  exportAuditCsv(): Promise<AegisResponse> {
+    return this.request("/api/export?kind=audit.csv");
+  }
+
+  exportAuditLogCsv(): Promise<AegisResponse> {
+    return this.request("/api/export?kind=auditlog.csv");
+  }
+
+  exportAuditJson(): Promise<AegisResponse> {
+    return this.request("/api/export?kind=audit.json");
+  }
+
+  sarReport(): Promise<AegisResponse> {
+    return this.request("/api/export?kind=report");
+  }
+
+  // ---- key lifecycle ----------------------------------------------------------------
+
+  listAgentKeys(walletId: string): Promise<AegisResponse> {
+    return this.request(`/api/keys?walletId=${encodeURIComponent(walletId)}`);
+  }
+
+  revokeAgentKey(walletId: string, publicKey: string): Promise<AegisResponse> {
+    return this.request("/api/keys/revoke", { method: "POST", body: { walletId, publicKey } });
+  }
+
+  rotateAgentKey(walletId: string, oldPublicKey: string): Promise<AegisResponse> {
+    return this.request("/api/keys/rotate", { method: "POST", body: { walletId, oldPublicKey } });
+  }
+
   // ---- multi-sig ------------------------------------------------------------
 
   listSigners(): Promise<AegisResponse> {

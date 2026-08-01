@@ -7,6 +7,11 @@ import type {
   Approval,
   AuditLogEntry,
   AgentKeyRecord,
+  BudgetGroup,
+  Counterparty,
+  CounterpartyStatus,
+  Escrow,
+  EscrowStatus,
   Organization,
   OutboxEntry,
   PolicyVersion,
@@ -16,6 +21,7 @@ import type {
   SignerRole,
   TxStatus,
   Transaction,
+  UsageRecord,
   Wallet,
   WalletPolicy,
   WalletStatus,
@@ -25,7 +31,6 @@ import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verify
 import { getRail } from "./rails";
 import { signKey } from "./keys";
 import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
-
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
 
 /** How long an owner has to approve/reject a high-risk transfer. */
@@ -112,6 +117,8 @@ async function init(client: Db): Promise<void> {
       monthly_limit REAL NOT NULL,
       velocity_limit_per_min INTEGER NOT NULL,
       allowlist TEXT NOT NULL,
+      spending_windows TEXT,
+      region_allowlist TEXT,
       created_at BIGINT NOT NULL
     )
   `);
@@ -166,7 +173,10 @@ async function init(client: Db): Promise<void> {
       public_key TEXT PRIMARY KEY,
       label TEXT NOT NULL,
       created_at BIGINT NOT NULL,
-      revoked_at BIGINT
+      revoked_at BIGINT,
+      expires_at BIGINT,
+      last_used_at BIGINT,
+      acl TEXT
     )
   `);
   await client.execute(`
@@ -223,6 +233,61 @@ async function init(client: Db): Promise<void> {
       created_at BIGINT NOT NULL
     )
   `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS counterparties (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      address TEXT NOT NULL,
+      org_id TEXT,
+      status TEXT NOT NULL,
+      flags TEXT NOT NULL,
+      total_paid REAL NOT NULL DEFAULT 0,
+      total_tx INTEGER NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS budget_groups (
+      id TEXT PRIMARY KEY,
+      org_id TEXT,
+      name TEXT NOT NULL,
+      monthly_limit REAL NOT NULL,
+      created_at BIGINT NOT NULL
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS budget_group_wallets (
+      group_id TEXT NOT NULL,
+      wallet_id TEXT NOT NULL,
+      PRIMARY KEY (group_id, wallet_id)
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS escrows (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      "from" TEXT NOT NULL,
+      "to" TEXT NOT NULL,
+      amount REAL NOT NULL,
+      condition TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      held_until BIGINT,
+      released_at BIGINT,
+      refunded_at BIGINT
+    )
+  `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS usage (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      org_id TEXT,
+      tx_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      rail TEXT NOT NULL,
+      created_at BIGINT NOT NULL
+    )
+  `);
 
   // v1 → v2 migration: old tables lack the hash-chain columns.
   const migrated: Array<"transactions" | "audit"> = [];
@@ -241,6 +306,15 @@ async function init(client: Db): Promise<void> {
   }
   if (!(await hasColumn(client, "wallets", "org_id"))) {
     await client.execute("ALTER TABLE wallets ADD COLUMN org_id TEXT");
+  }
+  if (!(await hasColumn(client, "wallets", "spending_windows"))) {
+    await client.execute("ALTER TABLE wallets ADD COLUMN spending_windows TEXT");
+    await client.execute("ALTER TABLE wallets ADD COLUMN region_allowlist TEXT");
+  }
+  if (!(await hasColumn(client, "agent_keys", "expires_at"))) {
+    await client.execute("ALTER TABLE agent_keys ADD COLUMN expires_at BIGINT");
+    await client.execute("ALTER TABLE agent_keys ADD COLUMN last_used_at BIGINT");
+    await client.execute("ALTER TABLE agent_keys ADD COLUMN acl TEXT");
   }
   if (!(await hasColumn(client, "audit", "seq"))) {
     await client.execute("ALTER TABLE audit ADD COLUMN seq INTEGER");
@@ -417,6 +491,11 @@ export async function resetStore(): Promise<Wallet[]> {
   await s.client.execute("DELETE FROM outbox");
   await s.client.execute("DELETE FROM signers");
   await s.client.execute("DELETE FROM approvals");
+  await s.client.execute("DELETE FROM counterparties");
+  await s.client.execute("DELETE FROM budget_group_wallets");
+  await s.client.execute("DELETE FROM budget_groups");
+  await s.client.execute("DELETE FROM escrows");
+  await s.client.execute("DELETE FROM usage");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
@@ -452,6 +531,8 @@ export async function recordOutbox(
     [entry.id, walletId, eventType, entry.payload, entry.createdAt],
   );
   s.events.emit("alert", entry);
+  // Best-effort push alert; never awaited so it cannot block the money path.
+  void import("./push").then(({ deliverAlert }) => deliverAlert(entry));
   return entry;
 }
 
@@ -490,6 +571,12 @@ function rowToWallet(row: Record<string, unknown>): Wallet {
       monthlyLimit: Number(row.monthly_limit),
       velocityLimitPerMin: Number(row.velocity_limit_per_min),
       allowlist: JSON.parse(row.allowlist as string) as string[],
+      spendingWindows: row.spending_windows
+        ? (JSON.parse(row.spending_windows as string) as WalletPolicy["spendingWindows"])
+        : undefined,
+      regionAllowlist: row.region_allowlist
+        ? (JSON.parse(row.region_allowlist as string) as string[])
+        : undefined,
     },
     createdAt: Number(row.created_at),
     orgId: row.org_id ? (row.org_id as string) : undefined,
@@ -559,8 +646,8 @@ export async function createWallet(input: {
   const s = getStore();
   await s.ready;
   await s.client.execute(
-    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at, org_id)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, spending_windows, region_allowlist, created_at, org_id)
+     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.id,
       input.name,
@@ -571,6 +658,8 @@ export async function createWallet(input: {
       input.policy.monthlyLimit,
       input.policy.velocityLimitPerMin,
       JSON.stringify(input.policy.allowlist),
+      input.policy.spendingWindows ? JSON.stringify(input.policy.spendingWindows) : null,
+      input.policy.regionAllowlist ? JSON.stringify(input.policy.regionAllowlist) : null,
       Date.now(),
       input.orgId ?? null,
     ],
@@ -631,6 +720,334 @@ export async function listOrgWallets(orgId: string): Promise<Wallet[]> {
     [orgId],
   );
   return rows.map((r) => rowToWallet(r as Record<string, unknown>));
+}
+
+// ─── Counterparty registry ────────────────────────────────────────────────
+
+function rowToCounterparty(row: Record<string, unknown>): Counterparty {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    address: row.address as string,
+    orgId: row.org_id ? (row.org_id as string) : undefined,
+    status: row.status as CounterpartyStatus,
+    flags: JSON.parse(row.flags as string) as string[],
+    totalPaid: Number(row.total_paid),
+    totalTx: Number(row.total_tx),
+    createdAt: Number(row.created_at),
+  };
+}
+
+export async function listCounterparties(orgId?: string): Promise<Counterparty[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = orgId
+    ? await s.client.execute("SELECT * FROM counterparties WHERE org_id = ? ORDER BY created_at ASC", [orgId])
+    : await s.client.execute("SELECT * FROM counterparties ORDER BY created_at ASC");
+  return rows.map((r) => rowToCounterparty(r as Record<string, unknown>));
+}
+
+export async function getCounterparty(address: string): Promise<Counterparty | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM counterparties WHERE address = ?", [address]);
+  const row = rows[0];
+  return row ? rowToCounterparty(row as Record<string, unknown>) : null;
+}
+
+export async function upsertCounterparty(input: {
+  name: string;
+  address: string;
+  orgId?: string;
+  status?: CounterpartyStatus;
+  flags?: string[];
+}): Promise<Counterparty> {
+  const s = getStore();
+  await s.ready;
+  const existing = await getCounterparty(input.address);
+  if (existing) {
+    await s.client.execute(
+      "UPDATE counterparties SET name = ?, status = ?, flags = ? WHERE address = ?",
+      [
+        input.name,
+        input.status ?? existing.status,
+        JSON.stringify(input.flags ?? existing.flags),
+        input.address,
+      ],
+    );
+    const { rows } = await s.client.execute("SELECT * FROM counterparties WHERE address = ?", [input.address]);
+    return rowToCounterparty(rows[0] as Record<string, unknown>);
+  }
+  const cp: Counterparty = {
+    id: `cp-${randomUUID().slice(0, 8)}`,
+    name: input.name,
+    address: input.address,
+    orgId: input.orgId,
+    status: input.status ?? "ACTIVE",
+    flags: input.flags ?? [],
+    totalPaid: 0,
+    totalTx: 0,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    "INSERT INTO counterparties (id, name, address, org_id, status, flags, total_paid, total_tx, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
+    [cp.id, cp.name, cp.address, cp.orgId ?? null, cp.status, JSON.stringify(cp.flags), cp.createdAt],
+  );
+  return cp;
+}
+
+/** Records a settled amount against a counterparty for reputation totals. */
+export async function recordCounterpartyPayment(
+  address: string,
+  amount: number,
+): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  const cp = await getCounterparty(address);
+  if (!cp) return;
+  await s.client.execute(
+    "UPDATE counterparties SET total_paid = total_paid + ?, total_tx = total_tx + 1 WHERE address = ?",
+    [amount, address],
+  );
+}
+
+// ─── Budget groups ────────────────────────────────────────────────────────
+
+function rowToBudgetGroup(row: Record<string, unknown>, walletIds: string[]): BudgetGroup {
+  return {
+    id: row.id as string,
+    orgId: row.org_id ? (row.org_id as string) : undefined,
+    name: row.name as string,
+    monthlyLimit: Number(row.monthly_limit),
+    walletIds,
+    createdAt: Number(row.created_at),
+  };
+}
+
+async function groupWalletIds(client: Db, groupId: string): Promise<string[]> {
+  const { rows } = await client.execute(
+    "SELECT wallet_id FROM budget_group_wallets WHERE group_id = ?",
+    [groupId],
+  );
+  return rows.map((r) => r.wallet_id as string);
+}
+
+export async function listBudgetGroups(orgId?: string): Promise<BudgetGroup[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = orgId
+    ? await s.client.execute("SELECT * FROM budget_groups WHERE org_id = ? ORDER BY created_at ASC", [orgId])
+    : await s.client.execute("SELECT * FROM budget_groups ORDER BY created_at ASC");
+  const out: BudgetGroup[] = [];
+  for (const row of rows) {
+    out.push(rowToBudgetGroup(row as Record<string, unknown>, await groupWalletIds(s.client, row.id as string)));
+  }
+  return out;
+}
+
+export async function getBudgetGroupForWallet(walletId: string): Promise<BudgetGroup | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT g.* FROM budget_groups g JOIN budget_group_wallets m ON m.group_id = g.id WHERE m.wallet_id = ?",
+    [walletId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return rowToBudgetGroup(row as Record<string, unknown>, await groupWalletIds(s.client, row.id as string));
+}
+
+export async function createBudgetGroup(input: {
+  name: string;
+  monthlyLimit: number;
+  orgId?: string;
+  walletIds?: string[];
+}): Promise<BudgetGroup> {
+  const s = getStore();
+  await s.ready;
+  const group: BudgetGroup = {
+    id: `bg-${randomUUID().slice(0, 8)}`,
+    orgId: input.orgId,
+    name: input.name,
+    monthlyLimit: input.monthlyLimit,
+    walletIds: input.walletIds ?? [],
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    "INSERT INTO budget_groups (id, org_id, name, monthly_limit, created_at) VALUES (?, ?, ?, ?, ?)",
+    [group.id, group.orgId ?? null, group.name, group.monthlyLimit, group.createdAt],
+  );
+  for (const wid of group.walletIds) {
+    await s.client.execute("INSERT OR IGNORE INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?)", [group.id, wid]);
+  }
+  return group;
+}
+
+export async function addWalletToBudgetGroup(groupId: string, walletId: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("INSERT OR IGNORE INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?)", [groupId, walletId]);
+}
+
+/** Sum of SETTLED + PENDING spend across a group's wallets in the last 30 days. */
+export async function groupSpendLast30d(group: BudgetGroup, now = Date.now()): Promise<number> {
+  const s = getStore();
+  await s.ready;
+  const monthMs = 30 * 24 * 60 * 60 * 1000;
+  let total = 0;
+  for (const walletId of group.walletIds) {
+    const { rows } = await s.client.execute(
+      "SELECT amount, status, settled_at, requested_at FROM transactions WHERE wallet_id = ? AND status IN ('SETTLED','PENDING')",
+      [walletId],
+    );
+    for (const r of rows) {
+      const when = r.status === "SETTLED" ? Number(r.settled_at) : Number(r.requested_at);
+      if (now - when < monthMs) total += Number(r.amount);
+    }
+  }
+  return total;
+}
+
+// ─── Escrows ──────────────────────────────────────────────────────────────
+
+function rowToEscrow(row: Record<string, unknown>): Escrow {
+  return {
+    id: row.id as string,
+    walletId: row.wallet_id as string,
+    from: row.from as string,
+    to: row.to as string,
+    amount: Number(row.amount),
+    condition: row.condition as string,
+    status: row.status as EscrowStatus,
+    createdAt: Number(row.created_at),
+    heldUntil: row.held_until ? Number(row.held_until) : undefined,
+    releasedAt: row.released_at ? Number(row.released_at) : undefined,
+    refundedAt: row.refunded_at ? Number(row.refunded_at) : undefined,
+  };
+}
+
+export async function createEscrow(input: {
+  walletId: string;
+  to: string;
+  amount: number;
+  condition: string;
+  heldUntil?: number;
+}): Promise<Escrow> {
+  const s = getStore();
+  await s.ready;
+  const escrow: Escrow = {
+    id: `esc-${randomUUID().slice(0, 8)}`,
+    walletId: input.walletId,
+    from: input.walletId,
+    to: input.to,
+    amount: input.amount,
+    condition: input.condition,
+    status: "HELD",
+    createdAt: Date.now(),
+    heldUntil: input.heldUntil,
+  };
+  await s.client.execute(
+    "INSERT INTO escrows (id, wallet_id, \"from\", \"to\", amount, condition, status, created_at, held_until) VALUES (?, ?, ?, ?, ?, ?, 'HELD', ?, ?)",
+    [escrow.id, escrow.walletId, escrow.from, escrow.to, escrow.amount, escrow.condition, escrow.createdAt, escrow.heldUntil ?? null],
+  );
+  await debitWallet(escrow.walletId, escrow.amount);
+  await addAudit({
+    walletId: escrow.walletId,
+    actor: "owner",
+    action: "ESCROW_CREATED",
+    details: `${escrow.amount} escrowed to ${escrow.to} until condition: ${escrow.condition}`,
+  });
+  return escrow;
+}
+
+export async function releaseEscrow(id: string, actor = "owner"): Promise<Escrow | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
+  const row = rows[0];
+  if (!row) return null;
+  const escrow = rowToEscrow(row as Record<string, unknown>);
+  if (escrow.status !== "HELD") return escrow;
+  await s.client.execute("UPDATE escrows SET status = 'RELEASED', released_at = ? WHERE id = ?", [Date.now(), id]);
+  await addAudit({
+    walletId: escrow.walletId,
+    actor: actor as AuditLogEntry["actor"],
+    action: "ESCROW_RELEASED",
+    details: `Escrow ${id.slice(0, 8)} released to ${escrow.to}`,
+  });
+  return { ...escrow, status: "RELEASED", releasedAt: Date.now() };
+}
+
+export async function refundEscrow(id: string, actor = "owner"): Promise<Escrow | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
+  const row = rows[0];
+  if (!row) return null;
+  const escrow = rowToEscrow(row as Record<string, unknown>);
+  if (escrow.status !== "HELD") return escrow;
+  await s.client.execute("UPDATE escrows SET status = 'REFUNDED', refunded_at = ? WHERE id = ?", [Date.now(), id]);
+  await creditWallet(escrow.walletId, escrow.amount);
+  await addAudit({
+    walletId: escrow.walletId,
+    actor: actor as AuditLogEntry["actor"],
+    action: "ESCROW_REFUNDED",
+    details: `Escrow ${id.slice(0, 8)} refunded ${escrow.amount}`,
+  });
+  return { ...escrow, status: "REFUNDED", refundedAt: Date.now() };
+}
+
+export async function listEscrows(walletId?: string): Promise<Escrow[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute("SELECT * FROM escrows WHERE wallet_id = ? ORDER BY created_at DESC", [walletId])
+    : await s.client.execute("SELECT * FROM escrows ORDER BY created_at DESC");
+  return rows.map((r) => rowToEscrow(r as Record<string, unknown>));
+}
+
+// ─── Usage metering ───────────────────────────────────────────────────────
+
+export async function recordUsage(input: {
+  walletId: string;
+  orgId?: string;
+  txId: string;
+  amount: number;
+  rail: string;
+}): Promise<UsageRecord> {
+  const s = getStore();
+  await s.ready;
+  const record: UsageRecord = {
+    id: randomUUID(),
+    walletId: input.walletId,
+    orgId: input.orgId,
+    txId: input.txId,
+    amount: input.amount,
+    rail: input.rail,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    "INSERT INTO usage (id, wallet_id, org_id, tx_id, amount, rail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [record.id, record.walletId, record.orgId ?? null, record.txId, record.amount, record.rail, record.createdAt],
+  );
+  return record;
+}
+
+export async function listUsage(walletId?: string): Promise<UsageRecord[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute("SELECT * FROM usage WHERE wallet_id = ? ORDER BY created_at DESC LIMIT 500", [walletId])
+    : await s.client.execute("SELECT * FROM usage ORDER BY created_at DESC LIMIT 500");
+  return rows.map((r) => ({
+    id: r.id as string,
+    walletId: r.wallet_id as string,
+    orgId: r.org_id ? (r.org_id as string) : undefined,
+    txId: r.tx_id as string,
+    amount: Number(r.amount),
+    rail: r.rail as string,
+    createdAt: Number(r.created_at),
+  }));
 }
 
 export async function createPolicyVersion(
@@ -733,13 +1150,15 @@ export async function promoteDuePolicies(now = Date.now()): Promise<number> {
   for (const [walletId, row] of newestByWallet) {
     const policy = JSON.parse(row.policy as string) as WalletPolicy;
     await s.client.execute(
-      "UPDATE wallets SET max_per_tx = ?, daily_limit = ?, monthly_limit = ?, velocity_limit_per_min = ?, allowlist = ? WHERE id = ?",
+      "UPDATE wallets SET max_per_tx = ?, daily_limit = ?, monthly_limit = ?, velocity_limit_per_min = ?, allowlist = ?, spending_windows = ?, region_allowlist = ? WHERE id = ?",
       [
         policy.maxPerTx,
         policy.dailyLimit,
         policy.monthlyLimit,
         policy.velocityLimitPerMin,
         JSON.stringify(policy.allowlist),
+        policy.spendingWindows ? JSON.stringify(policy.spendingWindows) : null,
+        policy.regionAllowlist ? JSON.stringify(policy.regionAllowlist) : null,
         walletId,
       ],
     );
@@ -880,6 +1299,14 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
       });
       if (next) {
         settled.push(next);
+        await recordUsage({
+          walletId: tx.walletId,
+          orgId: wallet.orgId,
+          txId: tx.id,
+          amount: tx.amount,
+          rail: getRail().id,
+        });
+        await recordCounterpartyPayment(tx.to, tx.amount);
         await addAudit({
           walletId: tx.walletId,
           actor: "system",
@@ -1193,6 +1620,16 @@ export async function debitWallet(id: string, amount: number): Promise<Wallet | 
   return getWallet(id);
 }
 
+export async function creditWallet(id: string, amount: number): Promise<Wallet | null> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "UPDATE wallets SET balance = balance + ? WHERE id = ?",
+    [amount, id],
+  );
+  return getWallet(id);
+}
+
 export async function listAudit(walletId?: string): Promise<AuditLogEntry[]> {
   const s = getStore();
   await s.ready;
@@ -1205,10 +1642,24 @@ export async function listAudit(walletId?: string): Promise<AuditLogEntry[]> {
   return rows.map((r) => rowToAudit(r as Record<string, unknown>));
 }
 
+function rowToAgentKey(row: Record<string, unknown>): AgentKeyRecord {
+  return {
+    walletId: row.wallet_id as string,
+    publicKey: row.public_key as string,
+    label: row.label as string,
+    createdAt: Number(row.created_at),
+    expiresAt: row.expires_at ? Number(row.expires_at) : undefined,
+    revokedAt: row.revoked_at ? Number(row.revoked_at) : undefined,
+    lastUsedAt: row.last_used_at ? Number(row.last_used_at) : undefined,
+    acl: row.acl ? (JSON.parse(row.acl as string) as AgentKeyRecord["acl"]) : undefined,
+  };
+}
+
 export async function registerAgentKey(
   walletId: string,
   publicKey: string,
   label: string,
+  opts?: { expiresAt?: number; acl?: AgentKeyRecord["acl"] },
 ): Promise<AgentKeyRecord> {
   const s = getStore();
   await s.ready;
@@ -1217,17 +1668,30 @@ export async function registerAgentKey(
     publicKey,
     label,
     createdAt: Date.now(),
+    expiresAt: opts?.expiresAt,
+    acl: opts?.acl,
   };
   await s.client.execute(
-    "INSERT INTO agent_keys (wallet_id, public_key, label, created_at) VALUES (?, ?, ?, ?)",
-    [walletId, publicKey, label, record.createdAt],
+    "INSERT INTO agent_keys (wallet_id, public_key, label, created_at, expires_at, acl) VALUES (?, ?, ?, ?, ?, ?)",
+    [walletId, publicKey, label, record.createdAt, record.expiresAt ?? null, record.acl ? JSON.stringify(record.acl) : null],
   );
   return record;
+}
+
+/** Marks a key's last-used timestamp (called on every signed request). */
+export async function touchAgentKey(walletId: string, publicKey: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "UPDATE agent_keys SET last_used_at = ? WHERE wallet_id = ? AND public_key = ?",
+    [Date.now(), walletId, publicKey],
+  );
 }
 
 export async function getActiveAgentKey(
   walletId: string,
   publicKey: string,
+  now = Date.now(),
 ): Promise<AgentKeyRecord | null> {
   const s = getStore();
   await s.ready;
@@ -1237,13 +1701,9 @@ export async function getActiveAgentKey(
   );
   const row = rows[0];
   if (!row) return null;
-  return {
-    walletId: row.wallet_id as string,
-    publicKey: row.public_key as string,
-    label: row.label as string,
-    createdAt: Number(row.created_at),
-    revokedAt: row.revoked_at ? Number(row.revoked_at) : undefined,
-  };
+  const key = rowToAgentKey(row as Record<string, unknown>);
+  if (key.expiresAt && now > key.expiresAt) return null;
+  return key;
 }
 
 export async function listAgentKeys(walletId?: string): Promise<AgentKeyRecord[]> {
@@ -1255,13 +1715,7 @@ export async function listAgentKeys(walletId?: string): Promise<AgentKeyRecord[]
         [walletId],
       )
     : await s.client.execute("SELECT * FROM agent_keys ORDER BY created_at DESC");
-  return rows.map((r) => ({
-    walletId: r.wallet_id as string,
-    publicKey: r.public_key as string,
-    label: r.label as string,
-    createdAt: Number(r.created_at),
-    revokedAt: r.revoked_at ? Number(r.revoked_at) : undefined,
-  }));
+  return rows.map((r) => rowToAgentKey(r as Record<string, unknown>));
 }
 
 export async function revokeAgentKey(
@@ -1274,6 +1728,19 @@ export async function revokeAgentKey(
     "UPDATE agent_keys SET revoked_at = ? WHERE wallet_id = ? AND public_key = ?",
     [Date.now(), walletId, publicKey],
   );
+}
+
+export async function rotateAgentKey(
+  walletId: string,
+  oldPublicKey: string,
+  newPublicKey: string,
+  label: string,
+  opts?: { expiresAt?: number; acl?: AgentKeyRecord["acl"] },
+): Promise<AgentKeyRecord> {
+  const s = getStore();
+  await s.ready;
+  await revokeAgentKey(walletId, oldPublicKey);
+  return registerAgentKey(walletId, newPublicKey, label, opts);
 }
 
 export { getStore };
