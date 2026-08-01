@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { listTransactions, settleDue } from "@/core/store";
+import { listBudgetGroups, listTransactions, settleDue } from "@/core/store";
+import { forecastAll } from "@/core/budget";
 
 export const runtime = "nodejs";
 
@@ -56,5 +57,7 @@ export async function GET(req: NextRequest) {
   for (const [purpose, e] of purposeMap) byPurpose.push({ purpose, ...e });
   byPurpose.sort((a, b) => b.usd - a.usd);
 
-  return json({ funnel, blockedReasons, dailySpend: days, byPurpose: byPurpose.slice(0, 8) });
+  const budgets = forecastAll(await listBudgetGroups(), txs, now);
+
+  return json({ funnel, blockedReasons, dailySpend: days, byPurpose: byPurpose.slice(0, 8), budgets });
 }
