@@ -3297,7 +3297,7 @@ export async function agentReputation(walletId: string): Promise<AgentReputation
   const s = getStore();
   await s.ready;
   const { rows } = await s.client.execute(
-    "SELECT status, amount FROM transactions WHERE wallet_id = ?",
+    "SELECT status, amount, rejection_reason FROM transactions WHERE wallet_id = ?",
     [walletId],
   );
   let settled = 0;
@@ -3313,7 +3313,11 @@ export async function agentReputation(walletId: string): Promise<AgentReputation
       totalSpent += amount;
       lastActiveAt = Math.max(lastActiveAt ?? 0, Number(r.requested_at ?? 0));
     } else if (status === "BLOCKED") {
-      blocked += 1;
+      // Operator-induced blocks (kill-switch freezes) are not the agent's
+      // fault — they must not drag the score down, or a legitimately frozen
+      // agent stays reputation-blocked after the freeze is lifted.
+      const reason = r.rejection_reason as string | undefined;
+      if (reason !== "WALLET_FROZEN" && reason !== "ORGANIZATION_FROZEN") blocked += 1;
     } else if (status === "REVOKED") {
       revoked += 1;
     }
