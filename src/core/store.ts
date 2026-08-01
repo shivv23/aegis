@@ -481,6 +481,29 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Real settlement rails (A2) + reconciliation (A5).
+    version: 9,
+    name: "settlement-rails",
+    up: async (client) => {
+      if (!(await hasColumn(client, "transactions", "rail"))) {
+        await client.execute("ALTER TABLE transactions ADD COLUMN rail TEXT");
+      }
+      if (!(await hasColumn(client, "wallets", "preferred_rail"))) {
+        await client.execute("ALTER TABLE wallets ADD COLUMN preferred_rail TEXT");
+      }
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS reconciliation_reports (
+          id TEXT PRIMARY KEY,
+          run_at BIGINT NOT NULL,
+          total INTEGER NOT NULL,
+          matched INTEGER NOT NULL,
+          breaks INTEGER NOT NULL,
+          details TEXT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -754,6 +777,7 @@ function rowToWallet(row: Record<string, unknown>): Wallet {
     },
     createdAt: Number(row.created_at),
     orgId: row.org_id ? (row.org_id as string) : undefined,
+    preferredRail: row.preferred_rail ? (row.preferred_rail as string) : undefined,
   };
 }
 
@@ -777,6 +801,7 @@ function rowToTransaction(row: Record<string, unknown>): Transaction {
     nonce: row.nonce as string,
     stepUpScore: row.step_up_score != null ? Number(row.step_up_score) : undefined,
     externalRef: row.external_ref ? (row.external_ref as string) : undefined,
+    rail: row.rail ? (row.rail as string) : undefined,
   };
 }
 
@@ -809,6 +834,19 @@ export async function getWallet(id: string): Promise<Wallet | null> {
   return row ? rowToWallet(row as Record<string, unknown>) : null;
 }
 
+/** Sets the settlement rail a wallet prefers (A2). */
+export async function setWalletPreferredRail(
+  id: string,
+  rail: string,
+): Promise<Wallet | null> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("UPDATE wallets SET preferred_rail = ? WHERE id = ?", [rail, id]);
+  const wallet = await getWallet(id);
+  if (wallet) s.events.emit("wallet", wallet);
+  return wallet;
+}
+
 export async function createWallet(input: {
   id: string;
   name: string;
@@ -816,12 +854,13 @@ export async function createWallet(input: {
   balance: number;
   policy: WalletPolicy;
   orgId?: string;
+  preferredRail?: string;
 }): Promise<Wallet> {
   const s = getStore();
   await s.ready;
   await s.client.execute(
-    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, spending_windows, region_allowlist, created_at, org_id)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, spending_windows, region_allowlist, created_at, org_id, preferred_rail)
+     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.id,
       input.name,
@@ -836,6 +875,7 @@ export async function createWallet(input: {
       input.policy.regionAllowlist ? JSON.stringify(input.policy.regionAllowlist) : null,
       Date.now(),
       input.orgId ?? null,
+      input.preferredRail ?? null,
     ],
   );
   const wallet = await getWallet(input.id);
@@ -1688,7 +1728,8 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
         details: `Transaction ${tx.id.slice(0, 8)} revoked after hold window because wallet was not active`,
       });
     } else {
-      const result = await getRail().execute({
+      const rail = getRail(wallet.preferredRail);
+      const result = await rail.execute({
         txId: tx.id,
         walletId: tx.walletId,
         to: tx.to,
@@ -1707,7 +1748,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
           walletId: tx.walletId,
           actor: "system",
           action: "TX_SETTLEMENT_FAILED",
-          details: `Rail ${getRail().id} rejected settlement of ${tx.amount} to ${tx.to}: ${result.detail ?? "unknown"}`,
+          details: `Rail ${rail.id} rejected settlement of ${tx.amount} to ${tx.to}: ${result.detail ?? "unknown"}`,
         });
         continue;
       }
@@ -1715,6 +1756,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
       const next = await transitionTransaction(tx.id, "SETTLED", {
         settledAt: now,
         externalRef: result.externalRef,
+        rail: rail.id,
       });
       if (next) {
         settled.push(next);
@@ -1723,14 +1765,14 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
           orgId: wallet.orgId,
           txId: tx.id,
           amount: tx.amount,
-          rail: getRail().id,
+          rail: rail.id,
         });
         await recordCounterpartyPayment(tx.to, tx.amount);
         await addAudit({
           walletId: tx.walletId,
           actor: "system",
           action: "TX_SETTLED",
-          details: `${tx.amount} settled to ${tx.to} via rail ${getRail().id} (${result.externalRef ?? "local"})${result.feeUnits && result.feeUnits !== "0" ? ` fee=${result.feeUnits}` : ""}`,
+          details: `${tx.amount} settled to ${tx.to} via rail ${rail.id} (${result.externalRef ?? "local"})${result.feeUnits && result.feeUnits !== "0" ? ` fee=${result.feeUnits}` : ""}`,
         });
       }
     }
@@ -1972,7 +2014,7 @@ export async function createTransaction(
 export async function transitionTransaction(
   id: string,
   to: TxStatus,
-  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number; pendingUntil?: number; externalRef?: string } = {},
+  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number; pendingUntil?: number; externalRef?: string; rail?: string } = {},
 ): Promise<Transaction | null> {
   const s = getStore();
   await s.ready;
@@ -1991,10 +2033,11 @@ export async function transitionTransaction(
     revokedAt: fields.revokedAt ?? tx.revokedAt,
     pendingUntil: fields.pendingUntil ?? tx.pendingUntil,
     externalRef: fields.externalRef ?? tx.externalRef,
+    rail: fields.rail ?? tx.rail,
   };
 
   await s.client.execute(
-    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ?, external_ref = ? WHERE id = ?`,
+    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ?, external_ref = ?, rail = ? WHERE id = ?`,
     [
       next.status,
       next.rejectionReason ?? null,
@@ -2003,6 +2046,7 @@ export async function transitionTransaction(
       next.revokedAt ?? null,
       next.pendingUntil ?? null,
       next.externalRef ?? null,
+      next.rail ?? null,
       id,
     ],
   );
@@ -2560,5 +2604,50 @@ function rowToSession(r: Record<string, unknown>): AuthSession {
     ip: r.ip ? (r.ip as string) : undefined,
     userAgent: r.user_agent ? (r.user_agent as string) : undefined,
     revokedAt: r.revoked_at ? Number(r.revoked_at) : undefined,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Reconciliation reports (A5)
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function saveReconciliationReport(report: {
+  id: string;
+  runAt: number;
+  total: number;
+  matched: number;
+  breaks: number;
+  breaksList: unknown[];
+}): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "INSERT INTO reconciliation_reports (id, run_at, total, matched, breaks, details) VALUES (?, ?, ?, ?, ?, ?)",
+    [report.id, report.runAt, report.total, report.matched, report.breaks, JSON.stringify(report.breaksList)],
+  );
+}
+
+export async function latestReconciliationReport(): Promise<{
+  id: string;
+  runAt: number;
+  total: number;
+  matched: number;
+  breaks: number;
+  breaksList: unknown[];
+} | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM reconciliation_reports ORDER BY run_at DESC LIMIT 1",
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0] as Record<string, unknown>;
+  return {
+    id: row.id as string,
+    runAt: Number(row.run_at),
+    total: Number(row.total),
+    matched: Number(row.matched),
+    breaks: Number(row.breaks),
+    breaksList: JSON.parse(row.details as string) as unknown[],
   };
 }

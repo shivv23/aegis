@@ -29,6 +29,8 @@ export interface Wallet {
   createdAt: number;
   /** Multi-tenant: owning organization, when scoped. */
   orgId?: string;
+  /** Settlement rail this wallet prefers (A2); falls back to AEGIS_RAIL env. */
+  preferredRail?: string;
 }
 
 export interface Organization {
@@ -147,6 +149,7 @@ export interface Transaction {
   nonce: string;
   stepUpScore?: number;
   externalRef?: string;
+  rail?: string;
 }
 
 export type AuditActor = "agent" | "owner" | "system";

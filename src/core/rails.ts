@@ -4,6 +4,12 @@ import { createHash } from "node:crypto";
  * Payment rail adapter. The guard never changes — only the executor does.
  * Settlement is routed through whichever rail is active so real-money rails
  * (testnet USDC, ACH-lite) can be plugged in without touching enforcement.
+ *
+ * Rail selection (A2): wallet.preferredRail → AEGIS_RAIL env → sandbox.
+ *
+ * Circle USDC testnet: set AEGIS_CIRCLE_API_KEY and optionally
+ * AEGIS_CIRCLE_SOURCE_ADDRESS to settle via the Circle sandbox API and return
+ * the on-chain transaction hash as the external reference.
  */
 
 export type RailId = "sandbox" | "usdc-testnet" | "ach-lite";
@@ -35,7 +41,13 @@ export interface Rail {
 }
 
 /** Deterministic fake on-chain ref from the settlement's immutable fields. */
-function fakeTxHash(input: RailSettlementInput): string {
+export function deriveExternalRef(input: {
+  walletId: string;
+  to: string;
+  amount: number;
+  nonce: string;
+  requestedAt: number;
+}): string {
   const digest = createHash("sha256")
     .update(JSON.stringify([input.walletId, input.to, input.amount, input.nonce, input.requestedAt]))
     .digest("hex");
@@ -51,28 +63,52 @@ const sandboxRail: Rail = {
   },
 };
 
+async function circleUsdcSettlement(input: RailSettlementInput): Promise<RailResult> {
+  const apiKey = process.env.AEGIS_CIRCLE_API_KEY;
+  const sourceAddress = process.env.AEGIS_CIRCLE_SOURCE_ADDRESS;
+  if (!apiKey) {
+    // No real gateway configured: simulate an on-chain settlement.
+    return { status: "SETTLED", externalRef: deriveExternalRef(input), feeUnits: "0" };
+  }
+  try {
+    const body: Record<string, unknown> = {
+      idempotencyKey: input.txId,
+      source: sourceAddress ? { type: "blockchain", address: sourceAddress } : undefined,
+      destination: { type: "blockchain", address: input.to },
+      amount: { amount: String(input.amountUnits ?? Math.round(input.amount * 100)), currency: "USD" },
+    };
+    if (!body.source) delete body.source;
+    const res = await fetch("https://api.circle.com/v1/transfers", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      return { status: "FAILED", detail: `Circle returned ${res.status}` };
+    }
+    const data = (await res.json()) as {
+      data?: { transactionHash?: string; id?: string };
+    };
+    const txHash = data.data?.transactionHash ?? data.data?.id;
+    if (!txHash) {
+      return { status: "FAILED", detail: "Circle did not return a transaction hash" };
+    }
+    return { status: "SETTLED", externalRef: txHash, feeUnits: "0" };
+  } catch (e) {
+    return { status: "FAILED", detail: e instanceof Error ? e.message : "Circle request failed" };
+  }
+}
+
 const usdcTestnetRail: Rail = {
   id: "usdc-testnet",
-  name: "USDC testnet (simulated)",
+  name: "USDC testnet",
   description:
-    "Simulated stablecoin settlement on a testnet. Produces a deterministic on-chain-style reference.",
+    "Circle sandbox settlement when AEGIS_CIRCLE_API_KEY is set; deterministic on-chain-style reference otherwise.",
   async execute(input) {
-    // When a real USDC bridge/gateway URL is configured, forward the
-    // settlement; otherwise simulate a successful on-chain settlement.
-    const url = process.env.AEGIS_USDC_RAIL_URL;
-    if (url) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      });
-      if (!res.ok) {
-        return { status: "FAILED", detail: `Rail gateway returned ${res.status}` };
-      }
-      const body = (await res.json()) as { txHash?: string };
-      return { status: "SETTLED", externalRef: body.txHash ?? fakeTxHash(input) };
-    }
-    return { status: "SETTLED", externalRef: fakeTxHash(input) };
+    return circleUsdcSettlement(input);
   },
 };
 
@@ -81,7 +117,8 @@ const achLiteRail: Rail = {
   name: "ACH-lite (mock)",
   description: "Mock bank rail. Settles with a bank-style reference.",
   async execute(input) {
-    return { status: "SETTLED", externalRef: `ach://${fakeTxHash(input).slice(2, 12)}` };
+    const ref = deriveExternalRef(input).slice(2, 12);
+    return { status: "SETTLED", externalRef: `ach://${ref}`, feeUnits: "0" };
   },
 };
 
@@ -91,8 +128,8 @@ const rails: Record<RailId, Rail> = {
   "ach-lite": achLiteRail,
 };
 
-export function getRail(id?: string): Rail {
-  const key = (id ?? process.env.AEGIS_RAIL ?? "sandbox") as RailId;
+export function getRail(preferredRail?: string): Rail {
+  const key = (preferredRail ?? process.env.AEGIS_RAIL ?? "sandbox") as RailId;
   return rails[key] ?? sandboxRail;
 }
 
@@ -103,4 +140,9 @@ export function listRails(): Rail[] {
     description,
     execute: undefined as unknown as Rail["execute"],
   }));
+}
+
+/** True when a rail needs an external gateway we do not (yet) simulate. */
+export function railIsSimulated(id: string): boolean {
+  return id === "usdc-testnet" && !process.env.AEGIS_CIRCLE_API_KEY;
 }
