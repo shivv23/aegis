@@ -27,9 +27,12 @@ export function txTime(tx: Transaction): number {
   return tx.status === "SETTLED" && tx.settledAt ? tx.settledAt : tx.requestedAt;
 }
 
-/** Counts SETTLED + PENDING spend since a timestamp. */
+/** Counts SETTLED + PENDING spend since a timestamp (blocked/revoked never count). */
 export function spendSince(txs: Transaction[], since: number): number {
-  return txs.reduce((sum, tx) => (txTime(tx) >= since ? sum + tx.amount : sum), 0);
+  return txs.reduce((sum, tx) => {
+    if (tx.status !== "SETTLED" && tx.status !== "PENDING") return sum;
+    return txTime(tx) >= since ? sum + tx.amount : sum;
+  }, 0);
 }
 
 /**
@@ -79,6 +82,7 @@ export function groupBurn(group: BudgetGroup, txs: Transaction[], now = Date.now
     const dayStart = now - i * DAY;
     const dayEnd = dayStart + DAY;
     const cumulative = groupTxs.reduce((sum, tx) => {
+      if (tx.status !== "SETTLED" && tx.status !== "PENDING") return sum;
       const t = txTime(tx);
       return t >= windowStart && t < dayEnd ? sum + tx.amount : sum;
     }, 0);

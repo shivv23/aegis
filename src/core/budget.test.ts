@@ -88,6 +88,16 @@ describe("budget forecast math (E3)", () => {
     const pending = { ...txs[0], status: "PENDING" as const, settledAt: undefined };
     expect(txTime(pending)).toBe(now - 10 * DAY);
   });
+
+  it("never counts blocked or revoked transactions toward spend", () => {
+    const now = Date.now();
+    const txs = [
+      settledTx({ walletId: "w1", amount: 100, requestedAt: now - 2 * DAY }),
+      { ...settledTx({ walletId: "w1", amount: 999, requestedAt: now - 1 * DAY }), status: "BLOCKED" as const },
+      { ...settledTx({ walletId: "w1", amount: 888, requestedAt: now - 1 * DAY }), status: "REVOKED" as const },
+    ];
+    expect(spendSince(txs, now - 30 * DAY)).toBe(100);
+  });
 });
 
 describe("budget forecast integration (E3)", () => {
