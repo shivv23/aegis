@@ -116,11 +116,19 @@ const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: 
   `src/lib/sdk.ts` (+ `sdk.test.ts`, 5 tests).
 - `scripts/agent-sim.ts` runs the hostile-agent demo through the SDK.
 
+## Product pages
+
+- **Command Center** (`/`) — live SSE feed, kill switch, wallet registry
+- **Agent Simulator** (`/simulator`) — hostile-agent attack presets against the real rail
+- **Policy Sandbox** (`/sandbox`) — one-click what-if scenarios
+- **Multi-sig** (`/multisig`) — 2-of-3 signer approval console
+- **Analytics** (`/analytics`) — guard funnel, blocked-reason chart, daily spend, by-purpose
+- **API Docs** (`/docs`) — human-readable reference + `GET /api/openapi` (OpenAPI 3.0)
+- **Whitepaper** (`/whitepaper`) — threat model, defense-in-depth, attack matrix, test matrix
+
 ## API
 
-All endpoints require `Authorization: Bearer <key>`.
-
-### Agent rail — the only thing an agent can do
+All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only thing an agent can do
 | Method | Path | Key | Purpose |
 |---|---|---|---|
 | `POST` | `/api/rail/transfer` | agent | Request a transfer. Guard decides. |
