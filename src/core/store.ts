@@ -562,7 +562,7 @@ const MIGRATIONS: Migration[] = [
       const { rows } = await client.execute("SELECT COUNT(*) AS n FROM wallets");
       if (Number(rows[0]?.n ?? 0) === 0) return;
       await client.execute(
-        "INSERT OR IGNORE INTO orgs (id, name, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO orgs (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING",
         [SEED_ORG_ID, "Acme Labs", Date.now()],
       );
       await client.execute(
@@ -1202,7 +1202,7 @@ export async function createBudgetGroup(input: {
     [group.id, group.orgId ?? null, group.name, group.monthlyLimit, group.createdAt],
   );
   for (const wid of group.walletIds) {
-    await s.client.execute("INSERT OR IGNORE INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?)", [group.id, wid]);
+    await s.client.execute("INSERT INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?) ON CONFLICT (group_id, wallet_id) DO NOTHING", [group.id, wid]);
   }
   return group;
 }
@@ -1210,7 +1210,7 @@ export async function createBudgetGroup(input: {
 export async function addWalletToBudgetGroup(groupId: string, walletId: string): Promise<void> {
   const s = getStore();
   await s.ready;
-  await s.client.execute("INSERT OR IGNORE INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?)", [groupId, walletId]);
+  await s.client.execute("INSERT INTO budget_group_wallets (group_id, wallet_id) VALUES (?, ?) ON CONFLICT (group_id, wallet_id) DO NOTHING", [groupId, walletId]);
 }
 
 /** Sum of SETTLED + PENDING spend across a group's wallets in the last 30 days. */
