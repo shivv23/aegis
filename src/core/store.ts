@@ -2090,10 +2090,11 @@ export async function declineStepUp(
  */
 export function getBreakerState(
   walletId: string,
+  now = Date.now(),
 ): { threshold: number; windowMs: number; anomalies: number; tripped: boolean } {
   const s = getStore();
   const windowMs = BREAKER_WINDOW_MS;
-  const cutoff = Date.now() - windowMs;
+  const cutoff = now - windowMs;
   const timestamps = (s.anomalies.get(walletId) ?? []).filter((t) => t >= cutoff);
   s.anomalies.set(walletId, timestamps);
   return {
@@ -2143,6 +2144,39 @@ export async function recordAnomaly(
     }
   }
   return { frozen, count: timestamps.length };
+}
+
+/**
+ * C6: releases wallets that the circuit breaker froze once their anomaly
+ * window has fully elapsed (anomalies === 0). Owner kill-switch freezes are
+ * never auto-released — they carry a WALLET_FROZEN audit, not AUTO_FREEZE.
+ * Returns the released wallet ids.
+ */
+export async function releaseExpiredBreakerFreezes(now = Date.now()): Promise<string[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT id FROM wallets WHERE status = 'FROZEN'");
+  const released: string[] = [];
+  for (const row of rows) {
+    const id = row.id as string;
+    const state = getBreakerState(id, now);
+    if (state.anomalies > 0) continue;
+    const { rows: trips } = await s.client.execute(
+      "SELECT 1 FROM audit WHERE wallet_id = ? AND action = 'AUTO_FREEZE' LIMIT 1",
+      [id],
+    );
+    if (trips.length === 0) continue;
+    await setWalletStatus(id, "ACTIVE");
+    released.push(id);
+    await addAudit({
+      walletId: id,
+      actor: "system",
+      action: "BREAKER_RESET",
+      details: "Anomaly window elapsed; circuit breaker reset and wallet re-enabled",
+    });
+    await recordOutbox(id, "BREAKER_RESET", { details: "Circuit breaker reset by scheduler" });
+  }
+  return released;
 }
 
 export async function addAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
