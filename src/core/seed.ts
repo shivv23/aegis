@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Db } from "./db";
 import { randomUUID } from "node:crypto";
 import type { Transaction, WalletPolicy } from "./types";
 
@@ -10,7 +10,7 @@ export const SEED_VENDORS = [
   "storage:0xDEAD0003",
 ];
 
-export async function seed(client: Client): Promise<void> {
+export async function seed(client: Db): Promise<void> {
   const now = Date.now();
   const dayMs = 24 * 60 * 60 * 1000;
 

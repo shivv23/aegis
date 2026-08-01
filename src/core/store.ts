@@ -1,8 +1,8 @@
-import { createClient } from "@libsql/client";
 import { EventEmitter } from "node:events";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { createDb, type Db } from "./db";
 import type {
   AuditLogEntry,
   RejectionReason,
@@ -25,7 +25,7 @@ function resolveUrl(): string {
 }
 
 type StoreShape = {
-  client: ReturnType<typeof createClient>;
+  client: Db;
   events: EventEmitter;
   ready: Promise<void>;
   nonces: Set<string>;
@@ -36,7 +36,7 @@ const g = globalThis as unknown as { __aegisStore?: StoreShape };
 function getStore(): StoreShape {
   if (g.__aegisStore) return g.__aegisStore;
 
-  const client = createClient({ url: resolveUrl() });
+  const client = createDb(resolveUrl());
   const events = new EventEmitter();
   const ready = init(client);
   const store: StoreShape = { client, events, ready, nonces: new Set() };
@@ -55,7 +55,7 @@ export async function consumeNonce(nonce: string): Promise<boolean> {
   return true;
 }
 
-async function init(client: ReturnType<typeof createClient>): Promise<void> {
+async function init(client: Db): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS wallets (
       id TEXT PRIMARY KEY,

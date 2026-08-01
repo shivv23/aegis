@@ -48,7 +48,9 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 
 - **Next.js 16 (App Router)** + **TypeScript (strict)** — API routes are the payment rail
 - **Tailwind CSS 4** + lucide-react — terminal-styled dashboard
-- **libSQL (`@libsql/client`)** — persistent, append-only ledger (works on Vercel via Turso)
+- **libSQL / PostgreSQL** (`src/core/db.ts`) — persistent, append-only ledger.
+  Runs on libSQL (SQLite) by default; point `AEGIS_DB_URL` at a Postgres
+  connection string to scale — no code changes.
 - **Zod** — runtime validation at every API boundary
 - **jose (JWT/HMAC)** — scoped agent vs owner keys
 - **SSE** — live transaction stream to the dashboard
@@ -156,9 +158,15 @@ scripts/agent-sim.ts  # standalone CLI agent that attacks the real rail
 | Variable | Default | Notes |
 |---|---|---|
 | `AEGIS_SECRET` | dev secret | HMAC secret for scoped keys — **set in prod** |
-| `AEGIS_DB_URL` | `file:./data/aegis.db` | set to a Turso `libsql://` URL to persist on Vercel |
+| `AEGIS_DB_URL` | `file:./data/aegis.db` | libSQL file, a Turso `libsql://` URL, **or a `postgres://` URL** to run on PostgreSQL |
 | `AEGIS_HOLD_MS` | `5000` | in-flight revocation window |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
+
+The database is swappable via the adapter in `src/core/db.ts`. Set
+`AEGIS_DB_URL=postgres://user:pass@host:5432/db` and the ledger runs on
+PostgreSQL with zero code changes (`?` placeholders are translated to `$n`).
+Migration steps: create the three tables (SQL is emitted on startup via
+`CREATE TABLE IF NOT EXISTS`), then set the env var.
 
 ## Demo hygiene for submission
 
