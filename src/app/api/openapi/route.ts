@@ -75,7 +75,9 @@ const spec = {
     },
     "/api/wallet/{id}/freeze": { post: { summary: "Engage the kill switch." } },
     "/api/wallet/{id}/unfreeze": { post: { summary: "Release the kill switch." } },
-    "/api/transactions": { get: { summary: "Ledger view." } },
+    "/api/transactions": {
+      get: { summary: "Ledger view (cursor-paginated).", description: "?walletId=&limit=&cursor= — keyset pages; pass nextCursor from the response to continue. Newest first." },
+    },
     "/api/transactions/{id}/revoke": { post: { summary: "Revoke an in-flight transaction." } },
     "/api/transactions/{id}/stepup": {
       post: { summary: "Owner decision on a high-risk transfer (approve/decline)." },
@@ -105,7 +107,7 @@ const spec = {
       patch: { summary: "PATCH ?id=<escrowId>&action=release|refund — settle or return the held funds." },
     },
     "/api/usage": {
-      get: { summary: "Usage metering per wallet (rows, totals, per-rail breakdown)." },
+      get: { summary: "Usage metering per wallet (rows, totals, per-rail breakdown).", description: "?walletId=&limit=&cursor= — cursor-paginated." },
     },
     "/api/currencies": {
       get: { summary: "Supported display currencies (USD, USDC, EUR, INR, ETH)." },
@@ -117,8 +119,8 @@ const spec = {
       },
     },
     "/api/ledger/verify": { get: { summary: "Prove the hash chain is intact." } },
-    "/api/audit": { get: { summary: "Audit trail." } },
-    "/api/outbox": { get: { summary: "Ops alert feed (guard decisions + wallet events)." } },
+    "/api/audit": { get: { summary: "Audit trail (cursor-paginated).", description: "?walletId=&limit=&cursor= — keyset pages, newest first." } },
+    "/api/outbox": { get: { summary: "Ops alert feed (guard decisions + wallet events), cursor-paginated.", description: "?walletId=&limit=&cursor=" } },
     "/api/breaker": { get: { summary: "Circuit-breaker state per wallet." } },
     "/api/simulate": { post: { summary: "What-if: replay history against a hypothetical policy." } },
     "/api/rails": { get: { summary: "Active settlement rail + available rails." } },

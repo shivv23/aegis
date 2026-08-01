@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createDb, type Db } from "./db";
+import { encodeCursor, type Cursor } from "./pagination";
 import type {
   Approval,
   AuditLogEntry,
@@ -1407,6 +1408,112 @@ export async function listUsage(walletId?: string): Promise<UsageRecord[]> {
     rail: r.rail as string,
     createdAt: Number(r.created_at),
   }));
+}
+
+// ─── Cursor pagination (C1) ────────────────────────────────────────────────
+
+export interface Page<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/**
+ * Keyset page: rows strictly older than the cursor's (orderCol, id) pair,
+ * newest first. Returns limit+1 rows to detect a next page cheaply.
+ */
+async function runPage<T>(
+  opts: {
+    table: string;
+    orderCol: string;
+    idCol?: string;
+    walletId?: string;
+    limit: number;
+    cursor: Cursor | null;
+    map: (row: Record<string, unknown>) => T;
+  },
+): Promise<Page<T>> {
+  const s = getStore();
+  await s.ready;
+  const idCol = opts.idCol ?? "id";
+  const params: unknown[] = [];
+  let where = "1=1";
+  if (opts.walletId) {
+    where += " AND wallet_id = ?";
+    params.push(opts.walletId);
+  }
+  if (opts.cursor) {
+    where += ` AND (${opts.orderCol} < ? OR (${opts.orderCol} = ? AND ${idCol} < ?))`;
+    params.push(opts.cursor.at, opts.cursor.at, opts.cursor.id);
+  }
+  const { rows } = await s.client.execute(
+    `SELECT * FROM ${opts.table} WHERE ${where} ORDER BY ${opts.orderCol} DESC, ${idCol} DESC LIMIT ?`,
+    [...params, opts.limit + 1],
+  );
+  const hasMore = rows.length > opts.limit;
+  const pageRows = hasMore ? rows.slice(0, opts.limit) : rows;
+  const items = pageRows.map((r) => opts.map(r as Record<string, unknown>));
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(Number(last[opts.orderCol]), String(last[idCol])) : null;
+  return { items, nextCursor };
+}
+
+export async function listTransactionsPage(opts: {
+  walletId?: string;
+  limit: number;
+  cursor: Cursor | null;
+}): Promise<Page<Transaction>> {
+  return runPage<Transaction>({ table: "transactions", orderCol: "requested_at", ...opts, map: (r) => rowToTransaction(r) });
+}
+
+export async function listAuditPage(opts: {
+  walletId?: string;
+  limit: number;
+  cursor: Cursor | null;
+}): Promise<Page<AuditLogEntry>> {
+  return runPage<AuditLogEntry>({ table: "audit", orderCol: "timestamp", ...opts, map: (r) => rowToAudit(r) });
+}
+
+export async function listOutboxPage(opts: {
+  walletId?: string;
+  limit: number;
+  cursor: Cursor | null;
+}): Promise<Page<OutboxEntry>> {
+  return runPage<OutboxEntry>({
+    table: "outbox",
+    orderCol: "created_at",
+    ...opts,
+    map: (r) => ({
+      id: r.id as string,
+      walletId: r.wallet_id as string,
+      eventType: r.event_type as string,
+      payload: r.payload as string,
+      createdAt: Number(r.created_at),
+      deliveredAt: r.delivered_at ? Number(r.delivered_at) : undefined,
+      attemptCount: Number(r.attempt_count),
+    }),
+  });
+}
+
+export async function listUsagePage(opts: {
+  walletId?: string;
+  limit: number;
+  cursor: Cursor | null;
+}): Promise<Page<UsageRecord>> {
+  return runPage<UsageRecord>({
+    table: "usage",
+    orderCol: "created_at",
+    ...opts,
+    map: (r) => ({
+      id: r.id as string,
+      walletId: r.wallet_id as string,
+      orgId: r.org_id ? (r.org_id as string) : undefined,
+      txId: r.tx_id as string,
+      amount: Number(r.amount),
+      fee: Number(r.fee ?? 0),
+      rail: r.rail as string,
+      createdAt: Number(r.created_at),
+    }),
+  });
 }
 
 export interface StoredSecretMeta {

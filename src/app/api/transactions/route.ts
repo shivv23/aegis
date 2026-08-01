@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { listTransactions, settleDue } from "@/core/store";
+import { listTransactionsPage, settleDue } from "@/core/store";
+import { clampLimit, decodeCursor } from "@/core/pagination";
 
 export const runtime = "nodejs";
 
@@ -10,7 +11,9 @@ export async function GET(req: NextRequest) {
   if (!authz.ok) return error(authz.reason!, 401);
 
   const walletId = req.nextUrl.searchParams.get("walletId") ?? undefined;
+  const limit = clampLimit(req.nextUrl.searchParams.get("limit"), 100, 1000);
+  const cursor = decodeCursor(req.nextUrl.searchParams.get("cursor"));
   await settleDue();
-  const transactions = await listTransactions(walletId);
-  return json({ transactions });
+  const { items, nextCursor } = await listTransactionsPage({ walletId, limit, cursor });
+  return json({ transactions: items, nextCursor, limit });
 }
