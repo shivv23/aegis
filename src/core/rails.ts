@@ -13,6 +13,7 @@ export interface RailSettlementInput {
   walletId: string;
   to: string;
   amount: number;
+  amountUnits: string;
   purpose: string;
   nonce: string;
   requestedAt: number;
@@ -21,6 +22,8 @@ export interface RailSettlementInput {
 export interface RailResult {
   status: "SETTLED" | "FAILED";
   externalRef?: string;
+  /** Integer fee units charged by the rail, if any (USD display precision). */
+  feeUnits?: string;
   detail?: string;
 }
 
@@ -44,7 +47,7 @@ const sandboxRail: Rail = {
   name: "Sandbox (in-process)",
   description: "Settles instantly inside the app. The default demo rail.",
   async execute(input) {
-    return { status: "SETTLED", externalRef: `local://${input.txId}` };
+    return { status: "SETTLED", externalRef: `local://${input.txId}`, feeUnits: "0" };
   },
 };
 

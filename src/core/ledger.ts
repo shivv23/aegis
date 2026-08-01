@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Db } from "./db";
 import type { LedgerProof } from "./types";
+import { unitsFromFloat } from "./money";
 
 /**
  * Tamper-evident, append-only ledger.
@@ -10,9 +11,17 @@ import type { LedgerProof } from "./types";
  * content (`hash`), and a global `seq` so the interleaved order of the two
  * tables is unambiguous. Rewriting or deleting any row breaks the chain and
  * is caught by `verifyLedger`.
+ *
+ * Money amounts enter the chain as integer units (see `money.ts`) — the
+ * tamper-evident path never hashes floats.
  */
 
 export const GENESIS_HASH = "aegis-genesis-" + "0".repeat(32);
+
+/** Integer unit string for the canonical ledger content (USD display precision). */
+function unitsStringOf(amount: unknown): string {
+  return unitsFromFloat(Number(amount), 2).toString();
+}
 
 export function chainHash(prevHash: string, content: string): string {
   return createHash("sha256").update(prevHash).update(content).digest("hex");
@@ -23,7 +32,7 @@ export function txContent(parts: {
   walletId: string;
   from: string;
   to: string;
-  amount: number;
+  amountUnits: string;
   purpose: string;
   nonce: string;
   requestedAt: number;
@@ -32,7 +41,7 @@ export function txContent(parts: {
     parts.walletId,
     parts.from,
     parts.to,
-    parts.amount,
+    parts.amountUnits,
     parts.purpose,
     parts.nonce,
     parts.requestedAt,
@@ -127,7 +136,7 @@ export async function verifyLedger(client: Db): Promise<LedgerProof> {
         walletId: r.wallet_id as string,
         from: r.from as string,
         to: r.to as string,
-        amount: Number(r.amount),
+        amountUnits: unitsStringOf(r.amount),
         purpose: r.purpose as string,
         nonce: r.nonce as string,
         requestedAt: Number(r.requested_at),
@@ -217,7 +226,7 @@ export async function rechain(
           walletId: r.wallet_id as string,
           from: r.from as string,
           to: r.to as string,
-          amount: Number(r.amount),
+          amountUnits: unitsStringOf(r.amount),
           purpose: r.purpose as string,
           nonce: r.nonce as string,
           requestedAt: Number(r.requested_at),

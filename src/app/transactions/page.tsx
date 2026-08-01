@@ -5,19 +5,34 @@ import { useStream } from "@/hooks/use-stream";
 import { Button, Reason, TxBadge } from "@/components/ui";
 import { ownerApi } from "@/lib/api-client";
 import { clock, money, shortId } from "@/lib/utils";
-import { Check, PauseCircle, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, PauseCircle, Search, X } from "lucide-react";
 import type { Transaction } from "@/core/types";
+
+const PAGE_SIZE = 10;
 
 export default function TransactionsPage() {
   const { transactions } = useStream();
   const [filter, setFilter] = useState<string>("ALL");
+  const [query, setQuery] = useState<string>("");
+  const [page, setPage] = useState<number>(0);
 
   const filters = ["ALL", "PENDING", "STEP_UP_REQUIRED", "SETTLED", "BLOCKED", "REVOKED"];
 
-  const rows = useMemo(() => {
-    const txs = filter === "ALL" ? transactions : transactions.filter((t) => t.status === filter);
-    return txs.slice(0, 100);
-  }, [transactions, filter]);
+  const pages = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const txs = transactions.filter((t) => {
+      if (filter !== "ALL" && t.status !== filter) return false;
+      if (!q) return true;
+      return [t.id, t.to, t.from, t.walletId, t.purpose, t.nonce]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(q));
+    });
+    const sorted = [...txs].sort((a, b) => b.requestedAt - a.requestedAt);
+    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    return { rows: sorted, totalPages, total: sorted.length };
+  }, [transactions, filter, query]);
+
+  const rows = pages.rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   async function revoke(tx: Transaction) {
     await ownerApi(`/api/transactions/${tx.id}/revoke`, { method: "POST" });
@@ -39,17 +54,34 @@ export default function TransactionsPage() {
         </p>
       </header>
 
-      <div className="flex gap-2">
-        {filters.map((f) => (
-          <Button
-            key={f}
-            variant={filter === f ? "primary" : "outline"}
-            size="sm"
-            onClick={() => setFilter(f)}
-          >
-            {f}
-          </Button>
-        ))}
+      <div className="flex gap-2 items-center justify-between flex-wrap">
+        <div className="flex gap-2">
+          {filters.map((f) => (
+            <Button
+              key={f}
+              variant={filter === f ? "primary" : "outline"}
+              size="sm"
+              onClick={() => {
+                setFilter(f);
+                setPage(0);
+              }}
+            >
+              {f}
+            </Button>
+          ))}
+        </div>
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted" />
+          <input
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setPage(0);
+            }}
+            placeholder="search id / to / purpose…"
+            className="pl-8 pr-3 py-1.5 rounded-lg border border-border bg-panel font-mono text-xs text-foreground placeholder:text-muted outline-none focus:border-info/50"
+          />
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-panel/70 overflow-hidden">
@@ -62,9 +94,10 @@ export default function TransactionsPage() {
           <span className="col-span-2 text-right">Verdict</span>
         </div>
         <div className="max-h-[600px] overflow-y-auto">
-          {rows.length === 0 ? (
+          {pages.total === 0 ? (
             <div className="px-4 py-12 text-center font-mono text-sm text-muted">
               no transactions{filter !== "ALL" ? ` with status ${filter}` : ""}
+              {query.trim() ? ` matching "${query}"` : ""}
             </div>
           ) : (
             rows.map((tx) => (
@@ -99,6 +132,30 @@ export default function TransactionsPage() {
               </div>
             ))
           )}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between font-mono text-xs text-muted">
+        <span>
+          {pages.total} tx{pages.total === 1 ? "" : "s"} · page {page + 1}/{pages.totalPages}
+        </span>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> Prev
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page + 1 >= pages.totalPages}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            Next <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
         </div>
       </div>
     </div>

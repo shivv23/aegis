@@ -46,6 +46,7 @@ describe("rail adapter", () => {
       walletId: SEED_WALLET_ID,
       to: "compute:0xCAFE0001",
       amount: 25,
+      amountUnits: "2500",
       purpose: "gpu",
       nonce: "n-1",
       requestedAt: 12345,
@@ -57,5 +58,21 @@ describe("rail adapter", () => {
         expect(a.externalRef).toMatch(/^0x[0-9a-f]{40}$/);
       }),
     );
+  });
+
+  it("sandbox rail returns a zero integer fee", async () => {
+    const rail = getRail("sandbox");
+    const input = {
+      txId: "t2",
+      walletId: SEED_WALLET_ID,
+      to: "compute:0xCAFE0001",
+      amount: 10,
+      amountUnits: "1000",
+      purpose: "fee test",
+      nonce: "n-2",
+      requestedAt: 12346,
+    };
+    const result = await rail.execute(input);
+    expect(result.feeUnits).toBe("0");
   });
 });

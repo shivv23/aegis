@@ -28,6 +28,7 @@ import type {
 } from "./types";
 import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
+import { unitsFromFloat } from "./money";
 import { getRail } from "./rails";
 import { signKey } from "./keys";
 import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
@@ -129,6 +130,7 @@ async function init(client: Db): Promise<void> {
       "from" TEXT NOT NULL,
       "to" TEXT NOT NULL,
       amount REAL NOT NULL,
+      amount_units TEXT NOT NULL DEFAULT '0',
       purpose TEXT NOT NULL,
       status TEXT NOT NULL,
       rejection_reason TEXT,
@@ -327,9 +329,69 @@ async function init(client: Db): Promise<void> {
     await rechain(client, migrated);
   }
 
+  // Versioned migrations: applied exactly once, in order, recorded in
+  // schema_migrations so prod can evolve without drops.
+  await applyMigrations(client);
+
   const { rows } = await client.execute("SELECT COUNT(*) AS n FROM wallets");
   if (Number(rows[0]?.n ?? 0) === 0) {
     await runSeed(client);
+  }
+}
+
+interface Migration {
+  version: number;
+  name: string;
+  up: (client: Db) => Promise<void>;
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    // Integer money on the ledger path: every transaction row gains an
+    // amount_units column (integer units at display precision). The hash
+    // chain already covers these units; this migration backfills the column
+    // and rechains existing rows so verify() stays consistent.
+    version: 3,
+    name: "money-units",
+    up: async (client) => {
+      if (!(await hasColumn(client, "transactions", "amount_units"))) {
+        await client.execute(
+          "ALTER TABLE transactions ADD COLUMN amount_units TEXT NOT NULL DEFAULT '0'",
+        );
+      }
+      const { rows: txs } = await client.execute(
+        'SELECT id, amount FROM transactions',
+      );
+      for (const r of txs) {
+        await client.execute(
+          "UPDATE transactions SET amount_units = ? WHERE id = ?",
+          [unitsFromFloat(Number(r.amount), 2).toString(), r.id],
+        );
+      }
+      await rechain(client, ["transactions"]);
+    },
+  },
+];
+
+async function applyMigrations(client: Db): Promise<void> {
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at BIGINT NOT NULL
+    )
+  `);
+  const { rows } = await client.execute(
+    "SELECT version FROM schema_migrations ORDER BY version",
+  );
+  const applied = new Set(rows.map((r) => Number(r.version)));
+  for (const migration of MIGRATIONS) {
+    if (applied.has(migration.version)) continue;
+    await migration.up(client);
+    await client.execute(
+      "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+      [migration.version, migration.name, Date.now()],
+    );
   }
 }
 
@@ -393,7 +455,7 @@ async function runSeed(client: Db): Promise<void> {
       walletId: SEED_WALLET_ID,
       from: SEED_WALLET_ID,
       to: h.to,
-      amount: h.amount,
+      amountUnits: unitsFromFloat(h.amount, 2).toString(),
       purpose: h.purpose,
       nonce,
       requestedAt: settledAt,
@@ -401,13 +463,14 @@ async function runSeed(client: Db): Promise<void> {
     await appendLedgerRow(
       client,
       "transactions",
-      ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
+      ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
       [
         randomUUID(),
         SEED_WALLET_ID,
         SEED_WALLET_ID,
         h.to,
         h.amount,
+        unitsFromFloat(h.amount, 2).toString(),
         h.purpose,
         "SETTLED",
         null,
@@ -1275,6 +1338,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
         walletId: tx.walletId,
         to: tx.to,
         amount: tx.amount,
+        amountUnits: unitsFromFloat(tx.amount, 2).toString(),
         purpose: tx.purpose,
         nonce: tx.nonce,
         requestedAt: tx.requestedAt,
@@ -1311,7 +1375,7 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
           walletId: tx.walletId,
           actor: "system",
           action: "TX_SETTLED",
-          details: `${tx.amount} settled to ${tx.to} via rail ${getRail().id} (${result.externalRef ?? "local"})`,
+          details: `${tx.amount} settled to ${tx.to} via rail ${getRail().id} (${result.externalRef ?? "local"})${result.feeUnits && result.feeUnits !== "0" ? ` fee=${result.feeUnits}` : ""}`,
         });
       }
     }
@@ -1505,13 +1569,14 @@ export async function createTransaction(
   await appendLedgerRow(
     s.client,
     "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref"],
+    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref"],
     [
       id,
       input.walletId,
       input.from,
       input.to,
       input.amount,
+      unitsFromFloat(input.amount, 2).toString(),
       input.purpose,
       input.status,
       input.rejectionReason ?? null,
@@ -1528,7 +1593,7 @@ export async function createTransaction(
       walletId: input.walletId,
       from: input.from,
       to: input.to,
-      amount: input.amount,
+      amountUnits: unitsFromFloat(input.amount, 2).toString(),
       purpose: input.purpose,
       nonce: input.nonce,
       requestedAt: input.requestedAt,

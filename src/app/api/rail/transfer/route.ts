@@ -5,6 +5,7 @@ import { runGuard, spendContext } from "@/core/guard";
 import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, getBudgetGroupForWallet, getCounterparty, getWallet, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
+import { decisionLink } from "@/core/approval-links";
 
 export const runtime = "nodejs";
 
@@ -207,6 +208,8 @@ async function executeTransfer(input: {
       to,
       score: risk.score,
       factors: risk.factors,
+      approveLink: await decisionLink(wallet.id, tx.id, "approve"),
+      declineLink: await decisionLink(wallet.id, tx.id, "decline"),
     });
     return json(
       {
@@ -216,6 +219,8 @@ async function executeTransfer(input: {
         threshold: STEP_UP_THRESHOLD,
         factors: risk.factors,
         expiresInMs: STEP_UP_TTL_MS,
+        approveLink: await decisionLink(wallet.id, tx.id, "approve"),
+        declineLink: await decisionLink(wallet.id, tx.id, "decline"),
         transaction: tx,
       },
       202,

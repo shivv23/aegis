@@ -46,6 +46,7 @@ next-env.d.ts
 
 # internal planning docs (never pushed)
 /plan.md
+/newplan.md
 /SESSION.md
 
 # python sdk
