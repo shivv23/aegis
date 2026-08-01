@@ -5,14 +5,14 @@ import { useStream } from "@/hooks/use-stream";
 import { Button, Reason, TxBadge } from "@/components/ui";
 import { ownerApi } from "@/lib/api-client";
 import { clock, money, shortId } from "@/lib/utils";
-import { PauseCircle } from "lucide-react";
+import { Check, PauseCircle, X } from "lucide-react";
 import type { Transaction } from "@/core/types";
 
 export default function TransactionsPage() {
   const { transactions } = useStream();
   const [filter, setFilter] = useState<string>("ALL");
 
-  const filters = ["ALL", "PENDING", "SETTLED", "BLOCKED", "REVOKED"];
+  const filters = ["ALL", "PENDING", "STEP_UP_REQUIRED", "SETTLED", "BLOCKED", "REVOKED"];
 
   const rows = useMemo(() => {
     const txs = filter === "ALL" ? transactions : transactions.filter((t) => t.status === filter);
@@ -21,6 +21,13 @@ export default function TransactionsPage() {
 
   async function revoke(tx: Transaction) {
     await ownerApi(`/api/transactions/${tx.id}/revoke`, { method: "POST" });
+  }
+
+  async function stepUp(tx: Transaction, action: "approve" | "decline") {
+    await ownerApi(`/api/transactions/${tx.id}/stepup`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
   }
 
   return (
@@ -77,6 +84,16 @@ export default function TransactionsPage() {
                     <Button variant="warn" size="sm" onClick={() => revoke(tx)}>
                       <PauseCircle className="h-3.5 w-3.5" /> Revoke
                     </Button>
+                  ) : null}
+                  {tx.status === "STEP_UP_REQUIRED" ? (
+                    <>
+                      <Button variant="primary" size="sm" onClick={() => stepUp(tx, "approve")}>
+                        <Check className="h-3.5 w-3.5" /> Approve
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={() => stepUp(tx, "decline")}>
+                        <X className="h-3.5 w-3.5" /> Decline
+                      </Button>
+                    </>
                   ) : null}
                 </span>
               </div>

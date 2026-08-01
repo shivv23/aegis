@@ -22,6 +22,13 @@ import { SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
 
+/** How long an owner has to approve/reject a high-risk transfer. */
+export const STEP_UP_TTL_MS = Number(process.env.AEGIS_STEPUP_TTL_MS ?? 120000);
+
+/** Circuit breaker: N guard anomalies within the window → auto-freeze. */
+export const BREAKER_THRESHOLD = Number(process.env.AEGIS_BREAKER_THRESHOLD ?? 5);
+export const BREAKER_WINDOW_MS = Number(process.env.AEGIS_BREAKER_WINDOW_MS ?? 60000);
+
 const isDemoMode = () => process.env.AEGIS_DEMO_MODE !== "0";
 
 /** Policy changes take effect after a timelock. Disabled in demo mode. */
@@ -47,6 +54,7 @@ type StoreShape = {
   events: EventEmitter;
   ready: Promise<void>;
   nonces: Set<string>;
+  anomalies: Map<string, number[]>;
 };
 
 const g = globalThis as unknown as { __aegisStore?: StoreShape };
@@ -57,7 +65,7 @@ function getStore(): StoreShape {
   const client = createDb(resolveUrl());
   const events = new EventEmitter();
   const ready = init(client);
-  const store: StoreShape = { client, events, ready, nonces: new Set() };
+  const store: StoreShape = { client, events, ready, nonces: new Set(), anomalies: new Map() };
   g.__aegisStore = store;
   return store;
 }
@@ -117,6 +125,7 @@ async function init(client: Db): Promise<void> {
       blocked_at INTEGER,
       revoked_at INTEGER,
       nonce TEXT NOT NULL,
+      step_up_score REAL,
       seq INTEGER,
       prev_hash TEXT,
       hash TEXT,
@@ -185,6 +194,9 @@ async function init(client: Db): Promise<void> {
     await client.execute("ALTER TABLE transactions ADD COLUMN hash TEXT");
     await client.execute("ALTER TABLE transactions ADD COLUMN canonical TEXT");
     migrated.push("transactions");
+  }
+  if (!(await hasColumn(client, "transactions", "step_up_score"))) {
+    await client.execute("ALTER TABLE transactions ADD COLUMN step_up_score REAL");
   }
   if (!(await hasColumn(client, "audit", "seq"))) {
     await client.execute("ALTER TABLE audit ADD COLUMN seq INTEGER");
@@ -345,6 +357,7 @@ export async function resetStore(): Promise<Wallet[]> {
   const s = getStore();
   await s.ready;
   s.nonces.clear();
+  s.anomalies.clear();
   await s.client.execute("DELETE FROM transactions");
   await s.client.execute("DELETE FROM audit");
   await s.client.execute("DELETE FROM wallets");
@@ -447,6 +460,7 @@ function rowToTransaction(row: Record<string, unknown>): Transaction {
     blockedAt: row.blocked_at ? Number(row.blocked_at) : undefined,
     revokedAt: row.revoked_at ? Number(row.revoked_at) : undefined,
     nonce: row.nonce as string,
+    stepUpScore: row.step_up_score != null ? Number(row.step_up_score) : undefined,
   };
 }
 
@@ -747,6 +761,149 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
   return settled;
 }
 
+/**
+ * Converts STEP_UP_REQUIRED transactions whose decision window has elapsed
+ * into BLOCKED. Returns the ids that expired.
+ */
+export async function expireStepUps(now = Date.now()): Promise<string[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT id, wallet_id FROM transactions WHERE status = 'STEP_UP_REQUIRED' AND pending_until IS NOT NULL AND pending_until <= ?",
+    [now],
+  );
+  const expired: string[] = [];
+  for (const row of rows) {
+    const id = row.id as string;
+    const walletId = row.wallet_id as string;
+    await transitionTransaction(id, "BLOCKED", {
+      rejectionReason: "STEP_UP_EXPIRED",
+      blockedAt: now,
+    });
+    await addAudit({
+      walletId,
+      actor: "system",
+      action: "STEP_UP_EXPIRED",
+      details: `High-risk transfer ${id.slice(0, 8)} expired without owner decision`,
+    });
+    expired.push(id);
+  }
+  return expired;
+}
+
+/**
+ * Owner approves a STEP_UP_REQUIRED transfer → it enters the normal holding
+ * window and will settle once it elapses.
+ */
+export async function approveStepUp(
+  id: string,
+): Promise<{ tx: Transaction; wallet: Wallet | null } | null> {
+  const s = getStore();
+  await s.ready;
+  const tx = await getTransaction(id);
+  if (!tx || tx.status !== "STEP_UP_REQUIRED") return null;
+  const now = Date.now();
+  const next = await transitionTransaction(id, "PENDING", {
+    pendingUntil: now + HOLD_MS,
+  });
+  await addAudit({
+    walletId: tx.walletId,
+    actor: "owner",
+    action: "STEP_UP_APPROVED",
+    details: `Owner approved high-risk transfer of ${tx.amount} to ${tx.to} (risk score ${tx.stepUpScore ?? "?"})`,
+  });
+  await recordOutbox(tx.walletId, "STEP_UP_APPROVED", {
+    txId: id,
+    amount: tx.amount,
+    to: tx.to,
+  });
+  return { tx: next!, wallet: await getWallet(tx.walletId) };
+}
+
+export async function declineStepUp(
+  id: string,
+): Promise<Transaction | null> {
+  const tx = await getTransaction(id);
+  if (!tx || tx.status !== "STEP_UP_REQUIRED") return null;
+  const next = await transitionTransaction(id, "BLOCKED", {
+    rejectionReason: "STEP_UP_DECLINED",
+    blockedAt: Date.now(),
+  });
+  await addAudit({
+    walletId: tx.walletId,
+    actor: "owner",
+    action: "STEP_UP_DECLINED",
+    details: `Owner declined high-risk transfer of ${tx.amount} to ${tx.to}`,
+  });
+  await recordOutbox(tx.walletId, "STEP_UP_DECLINED", {
+    txId: id,
+    amount: tx.amount,
+    to: tx.to,
+  });
+  return next;
+}
+
+/**
+ * Circuit breaker state. Returns the number of anomalies observed in the
+ * current window and whether the wallet is already frozen.
+ */
+export function getBreakerState(
+  walletId: string,
+): { threshold: number; windowMs: number; anomalies: number; tripped: boolean } {
+  const s = getStore();
+  const windowMs = BREAKER_WINDOW_MS;
+  const cutoff = Date.now() - windowMs;
+  const timestamps = (s.anomalies.get(walletId) ?? []).filter((t) => t >= cutoff);
+  s.anomalies.set(walletId, timestamps);
+  return {
+    threshold: BREAKER_THRESHOLD,
+    windowMs,
+    anomalies: timestamps.length,
+    tripped: timestamps.length >= BREAKER_THRESHOLD,
+  };
+}
+
+/**
+ * Records a guard anomaly (blocked transfer, rejected signature, critical
+ * risk) for the circuit breaker. If the anomaly count crosses the threshold
+ * within the window, the wallet is auto-frozen. Returns what happened.
+ */
+export async function recordAnomaly(
+  walletId: string,
+  eventType: string,
+  details: string,
+): Promise<{ frozen: boolean; count: number }> {
+  const s = getStore();
+  await s.ready;
+  const cutoff = Date.now() - BREAKER_WINDOW_MS;
+  const timestamps = (s.anomalies.get(walletId) ?? []).filter((t) => t >= cutoff);
+  timestamps.push(Date.now());
+  s.anomalies.set(walletId, timestamps);
+  await recordOutbox(walletId, eventType, { details, anomalyCount: timestamps.length });
+  await addAudit({
+    walletId,
+    actor: "system",
+    action: eventType,
+    details,
+  });
+
+  let frozen = false;
+  if (timestamps.length >= BREAKER_THRESHOLD) {
+    const wallet = await getWallet(walletId);
+    if (wallet && wallet.status !== "FROZEN") {
+      await setWalletStatus(walletId, "FROZEN");
+      frozen = true;
+      await addAudit({
+        walletId,
+        actor: "system",
+        action: "AUTO_FREEZE",
+        details: `Circuit breaker tripped after ${timestamps.length} anomalies in ${BREAKER_WINDOW_MS}ms`,
+      });
+    }
+  }
+  return { frozen, count: timestamps.length };
+}
+
 export async function addAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
   const s = getStore();
   await s.ready;
@@ -790,7 +947,7 @@ export async function createTransaction(
   await appendLedgerRow(
     s.client,
     "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
+    ["id", "wallet_id", "from", "to", "amount", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score"],
     [
       id,
       input.walletId,
@@ -806,6 +963,7 @@ export async function createTransaction(
       input.blockedAt ?? null,
       input.revokedAt ?? null,
       input.nonce,
+      input.stepUpScore ?? null,
     ],
     txContent({
       walletId: input.walletId,
@@ -830,7 +988,7 @@ export async function createTransaction(
 export async function transitionTransaction(
   id: string,
   to: TxStatus,
-  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number } = {},
+  fields: { rejectionReason?: RejectionReason; settledAt?: number; blockedAt?: number; revokedAt?: number; pendingUntil?: number } = {},
 ): Promise<Transaction | null> {
   const s = getStore();
   await s.ready;
@@ -847,16 +1005,18 @@ export async function transitionTransaction(
     settledAt: fields.settledAt ?? tx.settledAt,
     blockedAt: fields.blockedAt ?? tx.blockedAt,
     revokedAt: fields.revokedAt ?? tx.revokedAt,
+    pendingUntil: fields.pendingUntil ?? tx.pendingUntil,
   };
 
   await s.client.execute(
-    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ? WHERE id = ?`,
+    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ? WHERE id = ?`,
     [
       next.status,
       next.rejectionReason ?? null,
       next.settledAt ?? null,
       next.blockedAt ?? null,
       next.revokedAt ?? null,
+      next.pendingUntil ?? null,
       id,
     ],
   );

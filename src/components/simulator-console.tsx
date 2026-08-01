@@ -53,6 +53,13 @@ const scenarios = [
     purpose: "big order — leaves time to revoke",
   },
   {
+    id: "risky",
+    label: "Urgent drain (triggers step-up)",
+    to: "compute:0xCAFE0001",
+    amount: 95,
+    purpose: "emergency drain all funds now",
+  },
+  {
     id: "balance",
     label: "Balance drain",
     to: "storage:0xDEAD0003",

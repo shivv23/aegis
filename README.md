@@ -47,6 +47,9 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Tamper-evident ledger** | Ledger | every row is **hash-chained** (`prev_hash`+`hash`+global `seq`); `GET /api/ledger/verify` proves integrity |
 | **Policy versioning + timelock** | Wallet | limit changes are recorded as versions and take effect after `AEGIS_POLICY_TIMELOCK_MS` |
 | **Ops alert outbox** | Wallet | every guard decision and wallet event is queued for delivery (SSE + future webhooks) |
+| **Risk engine** | Rail | pre-tx score 0–100 (amount vs cap/budget, new payee, velocity burst, red-flag purpose, hour) |
+| **Step-up approval** | Wallet | risk score ≥ 55 → `STEP_UP_REQUIRED`; owner approves/declines before it may settle |
+| **Auto-freeze circuit breaker** | Wallet | N guard anomalies in a window → wallet freezes itself (`AEGIS_BREAKER_*`) |
 
 ## Stack
 
@@ -60,7 +63,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 39 tests incl. attack-resistance, signing, ledger, timelock suites
+- **Vitest** — 53 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker suites
 
 ## Getting started
 
@@ -94,6 +97,8 @@ All endpoints require `Authorization: Bearer <key>`.
 | `POST` | `/api/wallet/:id/freeze` | **Engage kill switch** |
 | `POST` | `/api/wallet/:id/unfreeze` | Release kill switch |
 | `POST` | `/api/transactions/:id/revoke` | Revoke an in-flight transaction |
+| `POST` | `/api/transactions/:id/stepup` | Owner decision on a high-risk transfer (`approve`/`decline`) |
+| `GET` | `/api/breaker` | Circuit-breaker state per wallet |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
@@ -137,6 +142,11 @@ PENDING ── owner revokes / wallet frozen ──▶ REVOKED (IN_FLIGHT_REVOKE
    can't instantly weaken the guard.
 8. **Append-only ledger.** Nothing is edited, only transitioned; the state
    machine rejects illegal transitions (`SETTLED → REVOKED` throws).
+9. **Risk-scored, human-in-the-loop.** Even a fully policy-compliant transfer
+   is scored 0–100. High-risk → `STEP_UP_REQUIRED`; the owner must approve
+   before it enters the settlement window. Critical risk is rejected outright.
+10. **Self-defending.** The circuit breaker counts guard anomalies and
+    auto-freezes a wallet that looks compromised before a human notices.
 
 ## Demo script (5 minutes)
 
@@ -159,14 +169,16 @@ PENDING ── owner revokes / wallet frozen ──▶ REVOKED (IN_FLIGHT_REVOKE
 src/
   core/            # enforcement heart (framework-free, fully tested)
     guard.ts       #   pure policy engine — the single choke point
+    risk.ts        #   deterministic pre-tx risk scoring (0–100)
     stateMachine.ts#   tx status transitions
     signing.ts     #   Ed25519 agent keypairs: sign/verify/canonical message
     ledger.ts      #   SHA-256 hash chain: append, verify, rechain
     keys.ts        #   owner JWT signing/verification
     db.ts          #   libSQL / PostgreSQL adapter (env-var switch)
-    store.ts       #   ledger, outbox, policy versions, agent keys
+    store.ts       #   ledger, outbox, policy versions, agent keys, breaker
     seed.ts        #   demo constants
-    guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts
+    guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
+    risk.test.ts / stepup.test.ts
     test-env.ts    #   in-memory DB env for tests
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
@@ -185,6 +197,9 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_HOLD_MS` | `5000` | in-flight revocation window |
 | `AEGIS_POLICY_TIMELOCK_MS` | `0` (demo) / `300000` (prod) | policy changes take effect after this delay |
 | `AEGIS_SIGNATURE_SKEW_MS` | `300000` | max age of a signed agent request |
+| `AEGIS_STEPUP_TTL_MS` | `120000` | how long an owner has to decide on a high-risk transfer |
+| `AEGIS_BREAKER_THRESHOLD` | `5` | anomalies within the window that auto-freeze a wallet |
+| `AEGIS_BREAKER_WINDOW_MS` | `60000` | circuit-breaker observation window |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set

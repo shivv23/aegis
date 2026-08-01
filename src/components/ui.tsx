@@ -57,6 +57,7 @@ const statusTones: Record<TxStatus, string> = {
   PENDING: "bg-warn/15 text-warn border-warn/40",
   BLOCKED: "bg-danger/15 text-danger border-danger/40",
   REVOKED: "bg-info/15 text-info border-info/40",
+  STEP_UP_REQUIRED: "bg-orange-400/15 text-orange-300 border-orange-400/40",
 };
 
 const walletTones: Record<WalletStatus, string> = {
@@ -72,6 +73,9 @@ const reasonTones: Record<string, string> = {
   INSUFFICIENT_FUNDS: "text-warn",
   IN_FLIGHT_REVOKED: "text-info",
   INVALID_SIGNATURE: "text-danger",
+  RISK_REJECTED: "text-danger",
+  STEP_UP_DECLINED: "text-warn",
+  STEP_UP_EXPIRED: "text-warn",
 };
 
 export function TxBadge({ status }: { status: TxStatus }) {

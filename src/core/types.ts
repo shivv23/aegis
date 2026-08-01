@@ -18,7 +18,12 @@ export interface Wallet {
   createdAt: number;
 }
 
-export type TxStatus = "PENDING" | "SETTLED" | "BLOCKED" | "REVOKED";
+export type TxStatus =
+  | "PENDING"
+  | "SETTLED"
+  | "BLOCKED"
+  | "REVOKED"
+  | "STEP_UP_REQUIRED";
 
 export type RejectionReason =
   | "WALLET_FROZEN"
@@ -28,7 +33,10 @@ export type RejectionReason =
   | "INSUFFICIENT_FUNDS"
   | "IN_FLIGHT_REVOKED"
   | "INVALID_SIGNATURE"
-  | "REQUEST_EXPIRED";
+  | "REQUEST_EXPIRED"
+  | "RISK_REJECTED"
+  | "STEP_UP_DECLINED"
+  | "STEP_UP_EXPIRED";
 
 export interface Transaction {
   id: string;
@@ -45,6 +53,7 @@ export interface Transaction {
   blockedAt?: number;
   revokedAt?: number;
   nonce: string;
+  stepUpScore?: number;
 }
 
 export type AuditActor = "agent" | "owner" | "system";
@@ -125,4 +134,18 @@ export interface LedgerProof {
   checked: number;
   brokenAt?: { seq: number; table: string; id: string };
   headHash: string;
+}
+
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export interface RiskFactor {
+  name: string;
+  points: number;
+  reason: string;
+}
+
+export interface RiskVerdict {
+  score: number;
+  level: RiskLevel;
+  factors: RiskFactor[];
 }

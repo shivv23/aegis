@@ -2,6 +2,7 @@ import type { TxStatus } from "./types";
 
 const VALID_TRANSITIONS: Record<TxStatus, TxStatus[]> = {
   PENDING: ["SETTLED", "BLOCKED", "REVOKED"],
+  STEP_UP_REQUIRED: ["PENDING", "BLOCKED"],
   SETTLED: [],
   BLOCKED: [],
   REVOKED: [],

@@ -23,6 +23,7 @@ import {
   Copy,
   Check,
   PauseCircle,
+  X,
 } from "lucide-react";
 import type { AuditLogEntry, Transaction } from "@/core/types";
 
@@ -126,6 +127,13 @@ export default function WalletDetail({
     await ownerApi(`/api/transactions/${tx.id}/revoke`, { method: "POST" });
   }
 
+  async function stepUp(tx: Transaction, action: "approve" | "decline") {
+    await ownerApi(`/api/transactions/${tx.id}/stepup`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+  }
+
   async function copy(text: string) {
     await navigator.clipboard.writeText(text);
     setCopied(text);
@@ -147,6 +155,7 @@ export default function WalletDetail({
 
   const frozen = wallet.status === "FROZEN";
   const pending = walletTxs.filter((t) => t.status === "PENDING");
+  const awaitingApproval = walletTxs.filter((t) => t.status === "STEP_UP_REQUIRED");
 
   return (
     <div className="space-y-6">
@@ -341,6 +350,39 @@ export default function WalletDetail({
 
         <div className="space-y-6">
           <SimulatorConsole walletId={wallet.id} agentKey={keys?.agentKey ?? null} frozen={frozen} />
+
+          {awaitingApproval.length > 0 ? (
+            <Card className="border-orange-400/40">
+              <div className="mb-3 font-mono text-xs uppercase tracking-widest text-orange-300">
+                Awaiting owner approval — risk engine flagged high risk
+              </div>
+              <div className="space-y-2">
+                {awaitingApproval.map((tx) => (
+                  <div key={tx.id} className="flex items-center justify-between gap-3 rounded-md border border-border bg-black/30 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="font-mono text-sm">
+                        <Money value={tx.amount} /> → {shortId(tx.to, 18)}
+                        {tx.stepUpScore != null ? (
+                          <span className="ml-2 text-[11px] text-orange-300">
+                            risk {tx.stepUpScore}/100
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-[11px] text-muted">{tx.purpose}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button variant="primary" size="sm" onClick={() => stepUp(tx, "approve")}>
+                        <Check className="h-3.5 w-3.5" /> Approve
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={() => stepUp(tx, "decline")}>
+                        <X className="h-3.5 w-3.5" /> Decline
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ) : null}
 
           {pending.length > 0 ? (
             <Card className="border-warn/40">

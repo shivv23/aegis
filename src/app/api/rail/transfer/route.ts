@@ -2,8 +2,9 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
-import { HOLD_MS, addAudit, consumeNonce, createTransaction, getWallet, listAgentKeys, listTransactions, settleDue } from "@/core/store";
+import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, getWallet, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
+import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
 
 export const runtime = "nodejs";
 
@@ -89,9 +90,11 @@ async function executeTransfer(input: {
   }
 
   await settleDue();
+  await expireStepUps(now);
   const wallet = await getWallet(walletId);
   if (!wallet) return error("Wallet not found", 404);
-  const context = spendContext(wallet.id, now, await listTransactions(wallet.id));
+  const history = await listTransactions(wallet.id);
+  const context = spendContext(wallet.id, now, history);
 
   const verdict = runGuard(wallet, amount, to, context);
 
@@ -108,6 +111,7 @@ async function executeTransfer(input: {
       blockedAt: now,
       nonce,
     });
+    await recordAnomaly(wallet.id, "TX_BLOCKED", `${amount} to ${to} blocked: ${verdict.details}`);
     await addAudit({
       walletId: wallet.id,
       actor: "agent",
@@ -125,6 +129,85 @@ async function executeTransfer(input: {
     );
   }
 
+  // Hard guard passed — now score the transfer for risk.
+  const risk = scoreTransfer({
+    wallet,
+    amount,
+    to,
+    purpose,
+    history,
+    now,
+  });
+
+  if (risk.level === "CRITICAL") {
+    const tx = await createTransaction({
+      walletId: wallet.id,
+      from: wallet.id,
+      to,
+      amount,
+      purpose,
+      status: "BLOCKED",
+      rejectionReason: "RISK_REJECTED",
+      requestedAt: now,
+      blockedAt: now,
+      nonce,
+      stepUpScore: risk.score,
+    });
+    await recordAnomaly(wallet.id, "TX_BLOCKED_RISK", `Critical risk score ${risk.score} for ${amount} to ${to}`);
+    return json(
+      {
+        status: "BLOCKED",
+        reason: "RISK_REJECTED",
+        details: `Critical risk score ${risk.score} (threshold ${CRITICAL_THRESHOLD})`,
+        score: risk.score,
+        factors: risk.factors,
+        transaction: tx,
+      },
+      403,
+    );
+  }
+
+  if (risk.level === "HIGH") {
+    const stepUpUntil = now + STEP_UP_TTL_MS;
+    const tx = await createTransaction({
+      walletId: wallet.id,
+      from: wallet.id,
+      to,
+      amount,
+      purpose,
+      status: "STEP_UP_REQUIRED",
+      requestedAt: now,
+      pendingUntil: stepUpUntil,
+      nonce,
+      stepUpScore: risk.score,
+    });
+    await addAudit({
+      walletId: wallet.id,
+      actor: "system",
+      action: "STEP_UP_REQUIRED",
+      details: `Risk score ${risk.score} (threshold ${STEP_UP_THRESHOLD}) — owner approval required for ${amount} to ${to}`,
+    });
+    await recordOutbox(wallet.id, "STEP_UP_REQUIRED", {
+      txId: tx.id,
+      amount,
+      to,
+      score: risk.score,
+      factors: risk.factors,
+    });
+    return json(
+      {
+        status: "STEP_UP_REQUIRED",
+        message: `Risk score ${risk.score} requires owner approval. Expires in ${STEP_UP_TTL_MS}ms.`,
+        score: risk.score,
+        threshold: STEP_UP_THRESHOLD,
+        factors: risk.factors,
+        expiresInMs: STEP_UP_TTL_MS,
+        transaction: tx,
+      },
+      202,
+    );
+  }
+
   const pendingUntil = now + HOLD_MS;
   const tx = await createTransaction({
     walletId: wallet.id,
@@ -136,6 +219,7 @@ async function executeTransfer(input: {
     requestedAt: now,
     pendingUntil,
     nonce,
+    stepUpScore: risk.score,
   });
   await addAudit({
     walletId: wallet.id,
@@ -149,6 +233,7 @@ async function executeTransfer(input: {
       status: "PENDING",
       message: `Transfer in flight. Will settle in ${HOLD_MS}ms unless frozen or revoked.`,
       holdsForMs: HOLD_MS,
+      score: risk.score,
       transaction: tx,
     },
     201,
