@@ -8,6 +8,7 @@
  *              (Resend transactional API; AEGIS_EMAIL_TO may be comma-separated)
  */
 import type { OutboxEntry } from "./types";
+import { createHmac } from "node:crypto";
 
 export function pushAlertEnabled(): boolean {
   return Boolean(
@@ -119,16 +120,67 @@ export async function deliverEmail(entry: OutboxEntry): Promise<boolean> {
 }
 
 /**
- * Delivers an outbox entry to every configured channel. Resolves the number
- * of successful deliveries — callers must never block on this.
+ * Delivers an outbox entry to every configured channel plus every registered
+ * webhook endpoint subscribed to this event type. Resolves the number of
+ * successful deliveries — callers must never block on this.
  */
 export async function deliverAlert(entry: OutboxEntry): Promise<number> {
   const results = await Promise.allSettled([
     deliverWebhook(entry),
     deliverSlack(entry),
     deliverEmail(entry),
+    deliverRegisteredWebhooks(entry),
   ]);
   return results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+}
+
+/**
+ * Fans the event out to self-serve webhook endpoints (webhook console) that
+ * subscribe to this event type. Each attempt is HMAC-signed and recorded in
+ * the delivery log for retry/replay.
+ */
+export async function deliverRegisteredWebhooks(entry: OutboxEntry): Promise<boolean> {
+  const { listWebhooks, recordWebhookDelivery } = await import("./store");
+  const endpoints = await listWebhooks();
+  const matching = endpoints.filter(
+    (w) => w.active && (w.eventTypes.length === 0 || w.eventTypes.includes(entry.eventType)),
+  );
+  let delivered = 0;
+  for (const endpoint of matching) {
+    const body = JSON.stringify({
+      event: entry.eventType,
+      walletId: entry.walletId,
+      payload: parsePayload(entry),
+      createdAt: entry.createdAt,
+      attempt: entry.attemptCount + 1,
+    });
+    try {
+      const signature = createHmac("sha256", endpoint.secret).update(body).digest("hex");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(endpoint.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-aegis-webhook": signature,
+        },
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      await recordWebhookDelivery(
+        endpoint.id,
+        entry.eventType,
+        { ...parsePayload(entry), walletId: entry.walletId },
+        res.ok ? "DELIVERED" : "FAILED",
+        res.status,
+      );
+      if (res.ok) delivered += 1;
+    } catch {
+      await recordWebhookDelivery(endpoint.id, entry.eventType, entry.payload, "FAILED");
+    }
+  }
+  return delivered > 0;
 }
 
 async function deliverWebhook(entry: OutboxEntry): Promise<boolean> {

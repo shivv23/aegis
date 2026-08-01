@@ -1,8 +1,9 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { rotateAgentKey, addAudit } from "@/core/store";
+import { rotateAgentKey, addAudit, putSecret } from "@/core/store";
 import { generateAgentKeyPair } from "@/core/signing";
+import { secretsEnabled } from "@/core/secrets";
 
 export const runtime = "nodejs";
 
@@ -29,16 +30,18 @@ export async function POST(req: NextRequest) {
     parsed.data.label ?? "rotated",
     { expiresAt: parsed.data.expiresAt },
   );
+  const stored = await putSecret(parsed.data.walletId, "agent-private-key", pair.privateKey);
   await addAudit({
     walletId: parsed.data.walletId,
     actor: "owner",
     action: "AGENT_KEY_ROTATED",
-    details: `Agent key ${parsed.data.publicKey.slice(0, 12)}… rotated to ${pair.publicKey.slice(0, 12)}…`,
+    details: `Agent key ${parsed.data.publicKey.slice(0, 12)}… rotated to ${pair.publicKey.slice(0, 12)}… (private key ${stored ? "encrypted at rest" : "not persisted"})`,
   });
   return json({
     ok: true,
     record,
     // The new private key is handed to the agent only at rotation time.
     privateKey: pair.privateKey,
+    recoverable: Boolean(stored),
   });
 }

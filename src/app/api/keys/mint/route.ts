@@ -1,8 +1,9 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { addAudit, registerAgentKey } from "@/core/store";
+import { addAudit, putSecret, registerAgentKey } from "@/core/store";
 import { generateAgentKeyPair } from "@/core/signing";
+import { secretsEnabled } from "@/core/secrets";
 
 export const runtime = "nodejs";
 
@@ -14,8 +15,9 @@ const mintSchema = z.object({
 /**
  * POST /api/keys/mint
  * Owner mints an Ed25519 agent keypair for a wallet. The private key is
- * returned exactly once; only the public key is stored. The agent signs
- * every transfer request with the private key.
+ * returned exactly once. When a KMS master key is configured the private key
+ * is also persisted envelope-encrypted (recoverable); otherwise only the
+ * public key is stored.
  */
 export async function POST(req: NextRequest) {
   const claims = await authenticate(req);
@@ -32,11 +34,12 @@ export async function POST(req: NextRequest) {
 
   const pair = generateAgentKeyPair();
   await registerAgentKey(walletId, pair.publicKey, label);
+  const stored = await putSecret(walletId, "agent-private-key", pair.privateKey);
   await addAudit({
     walletId,
     actor: "owner",
     action: "AGENT_KEY_MINTED",
-    details: `Agent keypair '${label}' minted (public ${pair.publicKey.slice(0, 12)}…)`,
+    details: `Agent keypair '${label}' minted (public ${pair.publicKey.slice(0, 12)}…, private key ${stored ? "encrypted at rest" : "not persisted"})`,
   });
 
   return json(
@@ -45,7 +48,10 @@ export async function POST(req: NextRequest) {
       label,
       publicKey: pair.publicKey,
       privateKey: pair.privateKey,
-      warning: "Store the private key securely. It is shown only once.",
+      recoverable: Boolean(stored),
+      warning: stored
+        ? "Private key stored encrypted at rest (KMS). Show once."
+        : "Store the private key securely. It is shown only once.",
     },
     201,
   );

@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { createEscrow, listEscrows, releaseEscrow, refundEscrow } from "@/core/store";
+import { createEscrow, findEscrowByIdempotencyKey, listEscrows, releaseEscrow, refundEscrow } from "@/core/store";
 
 export const runtime = "nodejs";
 
@@ -29,7 +29,14 @@ export async function POST(req: NextRequest) {
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return error("Invalid escrow payload", 400);
 
-  const escrow = await createEscrow(parsed.data);
+  const idempotencyKey =
+    req.headers.get("idempotency-key") ?? req.headers.get("x-idempotency-key") ?? undefined;
+  if (idempotencyKey) {
+    const existing = await findEscrowByIdempotencyKey(idempotencyKey);
+    if (existing) return json({ escrow: existing, replayed: true }, 200);
+  }
+
+  const escrow = await createEscrow({ ...parsed.data, idempotencyKey });
   return json({ escrow }, 201);
 }
 

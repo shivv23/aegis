@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
-import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, getBudgetGroupForWallet, getCounterparty, getWallet, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue, touchAgentKey } from "@/core/store";
+import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, getWallet, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
 import { decisionLink } from "@/core/approval-links";
@@ -29,6 +29,8 @@ export async function POST(req: NextRequest) {
 
   const { to, amount, purpose, nonce } = parsed.data;
   const now = Date.now();
+  const idempotencyKey =
+    req.headers.get("idempotency-key") ?? req.headers.get("x-idempotency-key") ?? undefined;
 
   // Path A — Ed25519 signed request. The agent IS its keypair.
   const signature = req.headers.get("x-aegis-signature");
@@ -63,7 +65,7 @@ export async function POST(req: NextRequest) {
         401,
       );
     }
-    return executeTransfer({ walletId, to, amount, purpose, nonce, now, region: req.headers.get("x-aegis-region") ?? undefined });
+    return executeTransfer({ walletId, to, amount, purpose, nonce, now, region: req.headers.get("x-aegis-region") ?? undefined, idempotencyKey });
   }
 
   // Path B — legacy scoped agent JWT (migration compatibility).
@@ -78,6 +80,7 @@ export async function POST(req: NextRequest) {
     nonce,
     now,
     region: req.headers.get("x-aegis-region") ?? undefined,
+    idempotencyKey,
   });
 }
 
@@ -89,8 +92,19 @@ async function executeTransfer(input: {
   nonce: string;
   now: number;
   region?: string;
+  idempotencyKey?: string;
 }) {
-  const { walletId, to, amount, purpose, nonce, now, region } = input;
+  const { walletId, to, amount, purpose, nonce, now, region, idempotencyKey } = input;
+
+  // Idempotent retry: a replayed key returns the original result instead of
+  // double-settling. Checked before nonce consumption so a retry does not
+  // burn the nonce or create a second transaction.
+  if (idempotencyKey) {
+    const existing = await findTransactionByIdempotencyKey(idempotencyKey);
+    if (existing) {
+      return json({ status: existing.status, replayed: true, transaction: existing }, 200);
+    }
+  }
 
   if (!(await consumeNonce(nonce))) {
     return error("Replay detected: nonce already used", 409);
@@ -125,6 +139,7 @@ async function executeTransfer(input: {
       requestedAt: now,
       blockedAt: now,
       nonce,
+      idempotencyKey,
     });
     await recordAnomaly(wallet.id, "TX_BLOCKED", `${amount} to ${to} blocked: ${verdict.details}`);
     await addAudit({
@@ -166,6 +181,7 @@ async function executeTransfer(input: {
       requestedAt: now,
       blockedAt: now,
       nonce,
+      idempotencyKey,
       stepUpScore: risk.score,
     });
     await recordAnomaly(wallet.id, "TX_BLOCKED_RISK", `Critical risk score ${risk.score} for ${amount} to ${to}`);
@@ -194,6 +210,7 @@ async function executeTransfer(input: {
       requestedAt: now,
       pendingUntil: stepUpUntil,
       nonce,
+      idempotencyKey,
       stepUpScore: risk.score,
     });
     await addAudit({

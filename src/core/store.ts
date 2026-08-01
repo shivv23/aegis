@@ -25,10 +25,14 @@ import type {
   Wallet,
   WalletPolicy,
   WalletStatus,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
+  WebhookEndpoint,
 } from "./types";
 import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
 import { unitsFromFloat } from "./money";
+import { decryptSecret, encryptSecret, secretsEnabled } from "./secrets";
 import { getRail } from "./rails";
 import { signKey } from "./keys";
 import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
@@ -290,6 +294,17 @@ async function init(client: Db): Promise<void> {
       created_at BIGINT NOT NULL
     )
   `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS secrets (
+      id TEXT PRIMARY KEY,
+      wallet_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      cipher TEXT NOT NULL,
+      dek TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      UNIQUE (wallet_id, kind)
+    )
+  `);
 
   // v1 → v2 migration: old tables lack the hash-chain columns.
   const migrated: Array<"transactions" | "audit"> = [];
@@ -381,6 +396,50 @@ const MIGRATIONS: Migration[] = [
     name: "rechain-both",
     up: async (client) => {
       await rechain(client, ["transactions", "audit"]);
+    },
+  },
+  {
+    // Idempotency keys: transfer and escrow rows may carry a client-supplied
+    // key so retries return the original result instead of double-settling.
+    version: 5,
+    name: "idempotency-keys",
+    up: async (client) => {
+      if (!(await hasColumn(client, "transactions", "idempotency_key"))) {
+        await client.execute("ALTER TABLE transactions ADD COLUMN idempotency_key TEXT");
+      }
+      if (!(await hasColumn(client, "escrows", "idempotency_key"))) {
+        await client.execute("ALTER TABLE escrows ADD COLUMN idempotency_key TEXT");
+      }
+    },
+  },
+  {
+    // Self-serve webhook endpoints with a delivery log.
+    version: 6,
+    name: "webhook-console",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS webhooks (
+          id TEXT PRIMARY KEY,
+          org_id TEXT,
+          url TEXT NOT NULL,
+          secret TEXT NOT NULL,
+          event_types TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS webhook_deliveries (
+          id TEXT PRIMARY KEY,
+          webhook_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          status TEXT NOT NULL,
+          http_status INTEGER,
+          attempted_at BIGINT NOT NULL,
+          delivered_at BIGINT
+        )
+      `);
     },
   },
 ];
@@ -571,6 +630,7 @@ export async function resetStore(): Promise<Wallet[]> {
   await s.client.execute("DELETE FROM budget_groups");
   await s.client.execute("DELETE FROM escrows");
   await s.client.execute("DELETE FROM usage");
+  await s.client.execute("DELETE FROM secrets");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
@@ -1007,9 +1067,14 @@ export async function createEscrow(input: {
   amount: number;
   condition: string;
   heldUntil?: number;
+  idempotencyKey?: string;
 }): Promise<Escrow> {
   const s = getStore();
   await s.ready;
+  if (input.idempotencyKey) {
+    const existing = await findEscrowByIdempotencyKey(input.idempotencyKey);
+    if (existing) return existing;
+  }
   const escrow: Escrow = {
     id: `esc-${randomUUID().slice(0, 8)}`,
     walletId: input.walletId,
@@ -1022,8 +1087,8 @@ export async function createEscrow(input: {
     heldUntil: input.heldUntil,
   };
   await s.client.execute(
-    "INSERT INTO escrows (id, wallet_id, \"from\", \"to\", amount, condition, status, created_at, held_until) VALUES (?, ?, ?, ?, ?, ?, 'HELD', ?, ?)",
-    [escrow.id, escrow.walletId, escrow.from, escrow.to, escrow.amount, escrow.condition, escrow.createdAt, escrow.heldUntil ?? null],
+    "INSERT INTO escrows (id, wallet_id, \"from\", \"to\", amount, condition, status, created_at, held_until, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, 'HELD', ?, ?, ?)",
+    [escrow.id, escrow.walletId, escrow.from, escrow.to, escrow.amount, escrow.condition, escrow.createdAt, escrow.heldUntil ?? null, input.idempotencyKey ?? null],
   );
   await debitWallet(escrow.walletId, escrow.amount);
   await addAudit({
@@ -1033,6 +1098,32 @@ export async function createEscrow(input: {
     details: `${escrow.amount} escrowed to ${escrow.to} until condition: ${escrow.condition}`,
   });
   return escrow;
+}
+
+export async function findTransactionByIdempotencyKey(
+  key: string,
+): Promise<Transaction | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM transactions WHERE idempotency_key = ? LIMIT 1",
+    [key],
+  );
+  if (rows.length === 0) return null;
+  return rowToTransaction(rows[0] as Record<string, unknown>);
+}
+
+export async function findEscrowByIdempotencyKey(
+  key: string,
+): Promise<Escrow | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM escrows WHERE idempotency_key = ? LIMIT 1",
+    [key],
+  );
+  if (rows.length === 0) return null;
+  return rowToEscrow(rows[0] as Record<string, unknown>);
 }
 
 export async function releaseEscrow(id: string, actor = "owner"): Promise<Escrow | null> {
@@ -1123,6 +1214,219 @@ export async function listUsage(walletId?: string): Promise<UsageRecord[]> {
     rail: r.rail as string,
     createdAt: Number(r.created_at),
   }));
+}
+
+export interface StoredSecretMeta {
+  id: string;
+  walletId: string;
+  kind: string;
+  createdAt: number;
+}
+
+/**
+ * Stores a secret encrypted at rest (envelope encryption). Returns the record
+ * or null when no master key is configured (secrets disabled).
+ */
+export async function putSecret(
+  walletId: string,
+  kind: string,
+  plaintext: string,
+): Promise<StoredSecretMeta | null> {
+  const s = getStore();
+  await s.ready;
+  if (!secretsEnabled()) return null;
+  const { cipher, dek } = encryptSecret(plaintext);
+  const id = randomUUID();
+  const now = Date.now();
+  await s.client.execute(
+    `INSERT INTO secrets (id, wallet_id, kind, cipher, dek, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (wallet_id, kind) DO UPDATE SET cipher = excluded.cipher, dek = excluded.dek, created_at = excluded.created_at`,
+    [id, walletId, kind, cipher, dek, now],
+  );
+  return { id, walletId, kind, createdAt: now };
+}
+
+/** Decrypts a stored secret. Null if missing, tampered, or secrets disabled. */
+export async function getSecret(walletId: string, kind: string): Promise<string | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT cipher, dek FROM secrets WHERE wallet_id = ? AND kind = ?",
+    [walletId, kind],
+  );
+  if (rows.length === 0) return null;
+  return decryptSecret({ cipher: rows[0].cipher as string, dek: rows[0].dek as string });
+}
+
+/** Lists which secrets exist for a wallet — metadata only, never ciphertext. */
+export async function listSecretMeta(walletId?: string): Promise<StoredSecretMeta[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute("SELECT id, wallet_id, kind, created_at FROM secrets WHERE wallet_id = ? ORDER BY created_at DESC", [walletId])
+    : await s.client.execute("SELECT id, wallet_id, kind, created_at FROM secrets ORDER BY created_at DESC");
+  return rows.map((r) => ({
+    id: r.id as string,
+    walletId: r.wallet_id as string,
+    kind: r.kind as string,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export async function deleteSecret(walletId: string, kind: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "DELETE FROM secrets WHERE wallet_id = ? AND kind = ?",
+    [walletId, kind],
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-serve webhooks (E1)
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function createWebhook(input: {
+  url: string;
+  secret: string;
+  eventTypes: string[];
+  orgId?: string;
+}): Promise<WebhookEndpoint> {
+  const s = getStore();
+  await s.ready;
+  const endpoint: WebhookEndpoint = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    url: input.url,
+    secret: input.secret,
+    eventTypes: input.eventTypes,
+    active: true,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    "INSERT INTO webhooks (id, org_id, url, secret, event_types, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+    [endpoint.id, endpoint.orgId ?? null, endpoint.url, endpoint.secret, JSON.stringify(endpoint.eventTypes), endpoint.createdAt],
+  );
+  return endpoint;
+}
+
+export async function listWebhooks(orgId?: string): Promise<WebhookEndpoint[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = orgId
+    ? await s.client.execute("SELECT * FROM webhooks WHERE org_id = ? ORDER BY created_at DESC", [orgId])
+    : await s.client.execute("SELECT * FROM webhooks ORDER BY created_at DESC");
+  return rows.map(rowToWebhook);
+}
+
+export async function getWebhook(id: string): Promise<WebhookEndpoint | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM webhooks WHERE id = ?", [id]);
+  if (rows.length === 0) return null;
+  return rowToWebhook(rows[0] as Record<string, unknown>);
+}
+
+export async function updateWebhook(
+  id: string,
+  patch: { url?: string; secret?: string; eventTypes?: string[]; active?: boolean },
+): Promise<WebhookEndpoint | null> {
+  const s = getStore();
+  await s.ready;
+  const existing = await getWebhook(id);
+  if (!existing) return null;
+  const next: WebhookEndpoint = {
+    ...existing,
+    url: patch.url ?? existing.url,
+    secret: patch.secret ?? existing.secret,
+    eventTypes: patch.eventTypes ?? existing.eventTypes,
+    active: patch.active ?? existing.active,
+  };
+  await s.client.execute(
+    "UPDATE webhooks SET url = ?, secret = ?, event_types = ?, active = ? WHERE id = ?",
+    [next.url, next.secret, JSON.stringify(next.eventTypes), next.active ? 1 : 0, id],
+  );
+  return next;
+}
+
+export async function deleteWebhook(id: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("DELETE FROM webhooks WHERE id = ?", [id]);
+  await s.client.execute("DELETE FROM webhook_deliveries WHERE webhook_id = ?", [id]);
+}
+
+export async function listWebhookDeliveries(
+  webhookId: string,
+  limit = 50,
+): Promise<WebhookDelivery[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY attempted_at DESC LIMIT ?",
+    [webhookId, limit],
+  );
+  return rows.map(rowToDelivery);
+}
+
+export async function getWebhookDelivery(id: string): Promise<WebhookDelivery | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM webhook_deliveries WHERE id = ?", [id]);
+  if (rows.length === 0) return null;
+  return rowToDelivery(rows[0] as Record<string, unknown>);
+}
+
+export async function recordWebhookDelivery(
+  webhookId: string,
+  eventType: string,
+  payload: unknown,
+  status: WebhookDeliveryStatus,
+  httpStatus?: number,
+): Promise<WebhookDelivery> {
+  const s = getStore();
+  await s.ready;
+  const delivery: WebhookDelivery = {
+    id: randomUUID(),
+    webhookId,
+    eventType,
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+    status,
+    httpStatus,
+    attemptedAt: Date.now(),
+    deliveredAt: status === "DELIVERED" ? Date.now() : undefined,
+  };
+  await s.client.execute(
+    "INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, status, http_status, attempted_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [delivery.id, webhookId, eventType, delivery.payload, status, httpStatus ?? null, delivery.attemptedAt, delivery.deliveredAt ?? null],
+  );
+  return delivery;
+}
+
+function rowToWebhook(r: Record<string, unknown>): WebhookEndpoint {
+  return {
+    id: r.id as string,
+    orgId: r.org_id ? (r.org_id as string) : undefined,
+    url: r.url as string,
+    secret: r.secret as string,
+    eventTypes: JSON.parse(r.event_types as string) as string[],
+    active: Number(r.active) === 1,
+    createdAt: Number(r.created_at),
+  };
+}
+
+function rowToDelivery(r: Record<string, unknown>): WebhookDelivery {
+  return {
+    id: r.id as string,
+    webhookId: r.webhook_id as string,
+    eventType: r.event_type as string,
+    payload: r.payload as string,
+    status: r.status as WebhookDeliveryStatus,
+    httpStatus: r.http_status ? Number(r.http_status) : undefined,
+    attemptedAt: Number(r.attempted_at),
+    deliveredAt: r.delivered_at ? Number(r.delivered_at) : undefined,
+  };
 }
 
 export async function createPolicyVersion(
@@ -1573,15 +1877,19 @@ export async function addAudit(entry: Omit<AuditLogEntry, "id" | "timestamp">) {
 }
 
 export async function createTransaction(
-  input: Omit<Transaction, "id">,
+  input: Omit<Transaction, "id"> & { idempotencyKey?: string },
 ): Promise<Transaction> {
   const s = getStore();
   await s.ready;
+  if (input.idempotencyKey) {
+    const existing = await findTransactionByIdempotencyKey(input.idempotencyKey);
+    if (existing) return existing;
+  }
   const id = randomUUID();
   await appendLedgerRow(
     s.client,
     "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref"],
+    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref", "idempotency_key"],
     [
       id,
       input.walletId,
@@ -1600,6 +1908,7 @@ export async function createTransaction(
       input.nonce,
       input.stepUpScore ?? null,
       input.externalRef ?? null,
+      input.idempotencyKey ?? null,
     ],
     txContent({
       walletId: input.walletId,

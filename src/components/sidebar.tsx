@@ -15,6 +15,7 @@ import {
   BookOpen,
   FileText,
   BarChart3,
+  Webhook,
   Home,
 } from "lucide-react";
 
@@ -23,6 +24,7 @@ const links = [
   { href: "/", label: "Command Center", icon: LayoutDashboard },
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/audit", label: "Audit Trail", icon: ScrollText },
+  { href: "/webhooks", label: "Webhooks", icon: Webhook },
   { href: "/simulator", label: "Agent Simulator", icon: Bot },
   { href: "/sandbox", label: "Policy Sandbox", icon: FlaskConical },
   { href: "/multisig", label: "Multi-sig", icon: Users },

@@ -277,3 +277,26 @@ export interface Approval {
   expiresAt: number;
   keyMinted: boolean;
 }
+
+export interface WebhookEndpoint {
+  id: string;
+  orgId?: string;
+  url: string;
+  secret: string;
+  eventTypes: string[];
+  active: boolean;
+  createdAt: number;
+}
+
+export type WebhookDeliveryStatus = "PENDING" | "DELIVERED" | "FAILED";
+
+export interface WebhookDelivery {
+  id: string;
+  webhookId: string;
+  eventType: string;
+  payload: string;
+  status: WebhookDeliveryStatus;
+  httpStatus?: number;
+  attemptedAt: number;
+  deliveredAt?: number;
+}
