@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
   if (claims!.walletId !== "*" && claims!.walletId !== walletId) {
     return error("Key not authorized for this wallet", 403);
   }
-  if (!secretsEnabled()) {
+  if (!(await secretsEnabled())) {
     return error("Secrets encryption is not enabled (no AEGIS_KMS_MASTER)", 404);
   }
 

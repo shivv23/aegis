@@ -572,6 +572,59 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    // Platform ops (C7 kill switches, D6 insurance pools, E6 settings,
+    // D2 DID registry, E2 report log). Idempotent CREATE IF NOT EXISTS so a
+    // partially applied upgrade is safe to re-run.
+    version: 13,
+    name: "platform-ops",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS kill_switches (
+          org_id TEXT PRIMARY KEY,
+          reason TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          set_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS insurance_pools (
+          id TEXT PRIMARY KEY,
+          org_id TEXT,
+          name TEXT NOT NULL,
+          capacity REAL NOT NULL,
+          loss_cap REAL NOT NULL,
+          deployed REAL NOT NULL DEFAULT 0,
+          created_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS user_settings (
+          owner TEXT PRIMARY KEY,
+          currency TEXT NOT NULL DEFAULT 'USD',
+          timezone TEXT NOT NULL DEFAULT 'UTC',
+          updated_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS did_registry (
+          did TEXT PRIMARY KEY,
+          doc TEXT NOT NULL,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS report_log (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -1534,8 +1587,8 @@ export async function putSecret(
 ): Promise<StoredSecretMeta | null> {
   const s = getStore();
   await s.ready;
-  if (!secretsEnabled()) return null;
-  const { cipher, dek } = encryptSecret(plaintext);
+  if (!(await secretsEnabled())) return null;
+  const { cipher, dek } = await encryptSecret(plaintext);
   const id = randomUUID();
   const now = Date.now();
   await s.client.execute(
@@ -2905,5 +2958,380 @@ export async function latestReconciliationReport(): Promise<{
     matched: Number(row.matched),
     breaks: Number(row.breaks),
     breaksList: JSON.parse(row.details as string) as unknown[],
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Global + per-org kill switches (C7). A super-admin can freeze an org's whole
+// fleet with a single call; the global switch freezes everything. Both are
+// checked at transaction creation so agents can never bypass them.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface KillSwitchState {
+  enabled: boolean;
+  reason: string;
+  setAt: number;
+}
+
+export async function setOrgKillSwitch(
+  orgId: string,
+  reason: string,
+  enabled: boolean,
+): Promise<KillSwitchState> {
+  const s = getStore();
+  await s.ready;
+  const state: KillSwitchState = { enabled, reason, setAt: Date.now() };
+  await s.client.execute(
+    `INSERT INTO kill_switches (org_id, reason, enabled, set_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (org_id) DO UPDATE SET reason = excluded.reason, enabled = excluded.enabled, set_at = excluded.set_at`,
+    [orgId, reason, enabled ? 1 : 0, state.setAt],
+  );
+  if (enabled) {
+    await addAudit({
+      walletId: "*",
+      actor: "owner",
+      action: "ORG_KILL_SWITCH_ON",
+      details: JSON.stringify({ orgId, reason }),
+    });
+  }
+  return state;
+}
+
+export async function getOrgKillSwitch(
+  orgId: string,
+): Promise<KillSwitchState | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM kill_switches WHERE org_id = ?",
+    [orgId],
+  );
+  if (rows.length === 0) return null;
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    enabled: Boolean(r.enabled),
+    reason: r.reason as string,
+    setAt: Number(r.set_at),
+  };
+}
+
+/** Master kill switch scope sentinel stored under the "*" org id. */
+const GLOBAL_KILL_ORG = "*";
+
+export async function setGlobalKillSwitch(
+  reason: string,
+  enabled: boolean,
+): Promise<KillSwitchState> {
+  return setOrgKillSwitch(GLOBAL_KILL_ORG, reason, enabled);
+}
+
+export async function getGlobalKillSwitch(): Promise<KillSwitchState | null> {
+  return getOrgKillSwitch(GLOBAL_KILL_ORG);
+}
+
+/**
+ * True if the org (or everything) is frozen by a kill switch. The global
+ * switch overrides any org-local state — it is the last line of defense.
+ */
+export async function isOrgFrozen(orgId?: string): Promise<string | null> {
+  const global = await getGlobalKillSwitch();
+  if (global?.enabled) return global.reason;
+  if (orgId) {
+    const local = await getOrgKillSwitch(orgId);
+    if (local?.enabled) return local.reason;
+  }
+  return null;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Insurance / guarantee pool (D6): a configurable loss-sharing cap per wallet.
+// The pool covers the first `lossCap` of any settled loss attributed to a
+// covered wallet, so counterparties have a real backstop for agent defaults.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface InsurancePool {
+  id: string;
+  orgId?: string;
+  name: string;
+  capacity: number;
+  lossCap: number;
+  deployed: number;
+  createdAt: number;
+}
+
+export async function createPool(input: {
+  name: string;
+  orgId?: string;
+  capacity: number;
+  lossCap: number;
+}): Promise<InsurancePool> {
+  const s = getStore();
+  await s.ready;
+  const pool: InsurancePool = {
+    id: randomUUID(),
+    orgId: input.orgId,
+    name: input.name,
+    capacity: input.capacity,
+    lossCap: input.lossCap,
+    deployed: 0,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    `INSERT INTO insurance_pools (id, org_id, name, capacity, loss_cap, deployed, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [pool.id, pool.orgId ?? null, pool.name, pool.capacity, pool.lossCap, pool.deployed, pool.createdAt],
+  );
+  return pool;
+}
+
+export async function listPools(orgId?: string): Promise<InsurancePool[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = orgId
+    ? await s.client.execute("SELECT * FROM insurance_pools WHERE org_id = ? ORDER BY created_at DESC", [orgId])
+    : await s.client.execute("SELECT * FROM insurance_pools ORDER BY created_at DESC");
+  return rows.map((r) => rowToPool(r as Record<string, unknown>));
+}
+
+export async function getPool(id: string): Promise<InsurancePool | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM insurance_pools WHERE id = ?", [id]);
+  return rows.length > 0 ? rowToPool(rows[0] as Record<string, unknown>) : null;
+}
+
+/**
+ * Remaining coverage for a pool — capacity minus what is already deployed.
+ * Losses beyond this are not covered (the pool cannot over-commit).
+ */
+export function poolRemaining(pool: InsurancePool): number {
+  return Math.max(0, pool.capacity - pool.deployed);
+}
+
+export async function deployPoolCoverage(poolId: string, amount: number): Promise<InsurancePool | null> {
+  const s = getStore();
+  await s.ready;
+  const pool = await getPool(poolId);
+  if (!pool) return null;
+  if (amount <= 0 || poolRemaining(pool) < amount) return null;
+  await s.client.execute(
+    "UPDATE insurance_pools SET deployed = deployed + ? WHERE id = ?",
+    [amount, poolId],
+  );
+  return getPool(poolId);
+}
+
+function rowToPool(r: Record<string, unknown>): InsurancePool {
+  return {
+    id: r.id as string,
+    orgId: r.org_id ? (r.org_id as string) : undefined,
+    name: r.name as string,
+    capacity: Number(r.capacity),
+    lossCap: Number(r.loss_cap),
+    deployed: Number(r.deployed),
+    createdAt: Number(r.created_at),
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-user settings (E6): display currency + timezone. UTC everywhere in the
+// ledger; these only change how numbers and timestamps are rendered.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface UserSettings {
+  owner: string;
+  currency: string;
+  timezone: string;
+  updatedAt: number;
+}
+
+export async function getUserSettings(owner: string): Promise<UserSettings> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM user_settings WHERE owner = ?",
+    [owner.toLowerCase()],
+  );
+  if (rows.length === 0) {
+    return { owner: owner.toLowerCase(), currency: "USD", timezone: "UTC", updatedAt: 0 };
+  }
+  const r = rows[0] as Record<string, unknown>;
+  return {
+    owner: r.owner as string,
+    currency: r.currency as string,
+    timezone: r.timezone as string,
+    updatedAt: Number(r.updated_at),
+  };
+}
+
+export async function setUserSettings(
+  owner: string,
+  patch: Partial<Pick<UserSettings, "currency" | "timezone">>,
+): Promise<UserSettings> {
+  const s = getStore();
+  await s.ready;
+  const current = await getUserSettings(owner);
+  const next: UserSettings = {
+    ...current,
+    currency: patch.currency ?? current.currency,
+    timezone: patch.timezone ?? current.timezone,
+    updatedAt: Date.now(),
+  };
+  await s.client.execute(
+    `INSERT INTO user_settings (owner, currency, timezone, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (owner) DO UPDATE SET currency = excluded.currency, timezone = excluded.timezone, updated_at = excluded.updated_at`,
+    [next.owner, next.currency, next.timezone, next.updatedAt],
+  );
+  return next;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// DID registry (D2): persisted DID documents. Resolution + verification live
+// in the pure `src/core/did.ts` module; this is the durable backing store.
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function registerDidDoc(did: string, doc: unknown): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  const now = Date.now();
+  await s.client.execute(
+    `INSERT INTO did_registry (did, doc, created_at, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (did) DO UPDATE SET doc = excluded.doc, updated_at = excluded.updated_at`,
+    [did, JSON.stringify(doc), now, now],
+  );
+}
+
+export async function getDidDoc(did: string): Promise<unknown | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM did_registry WHERE did = ?", [did]);
+  if (rows.length === 0) return null;
+  return JSON.parse((rows[0] as Record<string, unknown>).doc as string) as unknown;
+}
+
+export async function listDidDocs(): Promise<string[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT did FROM did_registry ORDER BY created_at");
+  return rows.map((r) => r.did as string);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Scheduled report log (E2): tracks daily/monthly digests + SAR-lite exports
+// delivered to email/Slack so the ops story is auditable.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ReportRecord {
+  id: string;
+  kind: string;
+  channel: string;
+  summary: string;
+  createdAt: number;
+}
+
+export async function recordReport(input: {
+  kind: string;
+  channel: string;
+  summary: string;
+}): Promise<ReportRecord> {
+  const s = getStore();
+  await s.ready;
+  const record: ReportRecord = { id: randomUUID(), ...input, createdAt: Date.now() };
+  await s.client.execute(
+    "INSERT INTO report_log (id, kind, channel, summary, created_at) VALUES (?, ?, ?, ?, ?)",
+    [record.id, record.kind, record.channel, record.summary, record.createdAt],
+  );
+  return record;
+}
+
+export async function listReports(kind?: string): Promise<ReportRecord[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = kind
+    ? await s.client.execute("SELECT * FROM report_log WHERE kind = ? ORDER BY created_at DESC LIMIT 50", [kind])
+    : await s.client.execute("SELECT * FROM report_log ORDER BY created_at DESC LIMIT 50");
+  return rows.map((r) => ({
+    id: r.id as string,
+    kind: r.kind as string,
+    channel: r.channel as string,
+    summary: r.summary as string,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Health / readiness (C5): a cheap round-trip the /api/health route uses.
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function dbPing(): Promise<boolean> {
+  try {
+    const s = getStore();
+    await s.ready;
+    await s.client.execute("SELECT 1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Agent reputation (D5): derived from the wallet's settle/block history. The
+// guard consumes it as a soft signal (documented in /api/analytics), and it
+// feeds the insurance pool's pricing story. Higher = safer.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface AgentReputation {
+  walletId: string;
+  score: number;
+  settled: number;
+  blocked: number;
+  revoked: number;
+  totalSpent: number;
+  lastActiveAt?: number;
+}
+
+export async function agentReputation(walletId: string): Promise<AgentReputation> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT status, amount FROM transactions WHERE wallet_id = ?",
+    [walletId],
+  );
+  let settled = 0;
+  let blocked = 0;
+  let revoked = 0;
+  let totalSpent = 0;
+  let lastActiveAt: number | undefined;
+  for (const r of rows) {
+    const status = r.status as string;
+    const amount = Number(r.amount);
+    if (status === "SETTLED") {
+      settled += 1;
+      totalSpent += amount;
+      lastActiveAt = Math.max(lastActiveAt ?? 0, Number(r.requested_at ?? 0));
+    } else if (status === "BLOCKED") {
+      blocked += 1;
+    } else if (status === "REVOKED") {
+      revoked += 1;
+    }
+  }
+  const attempt = settled + blocked + revoked;
+  const reliability = attempt > 0 ? settled / attempt : 0;
+  const penalty = Math.min(1, blocked / Math.max(1, attempt));
+  const spendFactor = Math.min(1, totalSpent / 100000);
+  const score = Math.round(
+    Math.max(0, Math.min(100, 20 + 60 * reliability - 30 * penalty + 20 * spendFactor)),
+  );
+  return {
+    walletId,
+    score,
+    settled,
+    blocked,
+    revoked,
+    totalSpent,
+    lastActiveAt,
   };
 }

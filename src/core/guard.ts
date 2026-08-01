@@ -178,6 +178,24 @@ export function checkGroupBudget(
 }
 
 /**
+ * Reputation gate (D5): a wallet whose behavioural track record is broken
+ * (score below 15) is blocked from moving money until its reliability
+ * improves. Optional — only enforced when the caller supplies a score, so
+ * purely-local policy checks never depend on history.
+ */
+export function checkReputation(
+  reputation: number | undefined,
+): GuardResult {
+  if (reputation !== undefined && reputation < 15) {
+    return deny(
+      "REPUTATION_BLOCKED",
+      `Agent reputation ${reputation}/100 is below the 15/100 reliability floor`,
+    );
+  }
+  return ok();
+}
+
+/**
  * The full guard chain. Runs every policy check in order and returns
  * the first violation. This is the single choke point through which all
  * money movement must pass. It is pure and deterministic by design.
@@ -190,6 +208,8 @@ export function runGuard(
   extra?: {
     counterpartyStatus?: string;
     groupLimit?: number;
+    /** Agent reputation (0–100, D5). Only enforced when explicitly provided. */
+    reputation?: number;
   },
 ): GuardResult {
   const checks: GuardResult[] = [
@@ -199,6 +219,7 @@ export function runGuard(
     checkSpendingWindow(wallet, context.now ?? Date.now()),
     checkRegion(wallet, context.region),
     checkCounterparty(extra?.counterpartyStatus, to),
+    checkReputation(extra?.reputation),
     checkFunds(wallet, amount),
     checkDailyLimit(wallet, amount, context.spentLast24h),
     checkMonthlyLimit(wallet, amount, context.spentLast30d),

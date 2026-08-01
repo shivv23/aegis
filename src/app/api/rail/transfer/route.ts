@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
-import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, resolveEffectiveWallet, settleDue, touchAgentKey } from "@/core/store";
+import { HOLD_MS, STEP_UP_TTL_MS, addAudit, agentReputation, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, groupSpendLast30d, isOrgFrozen, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, resolveEffectiveWallet, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
 import { decisionLink } from "@/core/approval-links";
@@ -114,17 +114,56 @@ async function executeTransfer(input: {
   await expireStepUps(now);
   const wallet = await resolveEffectiveWallet(walletId);
   if (!wallet) return error("Wallet not found", 404);
+
+  // C7 kill switch: a global or org-level kill switch freezes the whole fleet.
+  // Checked here — after identity, before any money can move — so it is
+  // impossible for an agent to bypass a super-admin freeze.
+  const frozenReason = await isOrgFrozen(wallet.orgId);
+  if (frozenReason) {
+    const tx = await createTransaction({
+      walletId: wallet.id,
+      from: wallet.id,
+      to,
+      amount,
+      purpose,
+      status: "BLOCKED",
+      rejectionReason: "ORGANIZATION_FROZEN",
+      requestedAt: now,
+      blockedAt: now,
+      nonce,
+      idempotencyKey,
+    });
+    await recordAnomaly(wallet.id, "TX_BLOCKED", `${amount} to ${to} blocked: kill switch active (${frozenReason})`);
+    await addAudit({
+      walletId: wallet.id,
+      actor: "system",
+      action: "TX_BLOCKED",
+      details: `${amount} to ${to} blocked by kill switch: ${frozenReason}`,
+    });
+    return json(
+      {
+        status: "BLOCKED",
+        reason: "ORGANIZATION_FROZEN",
+        details: `Kill switch active: ${frozenReason}`,
+        transaction: tx,
+      },
+      403,
+    );
+  }
+
   const history = await listTransactions(wallet.id);
   const context = spendContext(wallet.id, now, history);
 
-  // Counterparty reputation + budget group enforcement.
+  // Counterparty reputation + budget group + agent reputation enforcement.
   const counterparty = await getCounterparty(to);
   const group = await getBudgetGroupForWallet(wallet.id);
   const groupSpent = group ? await groupSpendLast30d(group, now) : undefined;
+  const reputation = (await agentReputation(wallet.id)).score;
 
   const verdict = runGuard(wallet, amount, to, { ...context, region, groupSpent }, {
     counterpartyStatus: counterparty?.status,
     groupLimit: group?.monthlyLimit,
+    reputation,
   });
 
   if (!verdict.allowed) {

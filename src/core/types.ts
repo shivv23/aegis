@@ -155,7 +155,9 @@ export type RejectionReason =
   | "OUTSIDE_SPENDING_WINDOW"
   | "REGION_BLOCKED"
   | "COUNTERPARTY_BLOCKED"
-  | "GROUP_LIMIT_EXCEEDED";
+  | "GROUP_LIMIT_EXCEEDED"
+  | "ORGANIZATION_FROZEN"
+  | "REPUTATION_BLOCKED";
 
 export interface Transaction {
   id: string;

@@ -3,7 +3,6 @@ import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { addAudit, putSecret, registerAgentKey } from "@/core/store";
 import { generateAgentKeyPair } from "@/core/signing";
-import { secretsEnabled } from "@/core/secrets";
 
 export const runtime = "nodejs";
 
