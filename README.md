@@ -18,6 +18,11 @@ Deployed on Vercel against a Neon PostgreSQL ledger (persistent, tamper-evident)
 - **Dashboard:** https://aegis-shivv23s-projects.vercel.app
 - **API (demo):** `GET /api/bootstrap` hands the UI the demo owner key; agent
   keys are minted per-wallet and Ed25519-signed transfers hit `POST /api/rail/transfer`
+- **On-chain Guardian (Sepolia):** `Guardian` at
+  `0xbdA598ffF1245E8cF147cfe3F99e4c49204C5343`, `PolicyRegistry` at
+  `0x629Be710c67f666b7b3eFEB0c16831Ea28E0BEA1`. The active policy hash is
+  sealed on-chain and equals the app's `policyHash()`; `GET /api/guardian`
+  reports live limits + `matches: true` when the off-chain hash equals the seal.
 
 ---
 
@@ -60,6 +65,9 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Auto-freeze circuit breaker** | Wallet | N guard anomalies in a window → wallet freezes itself (`AEGIS_BREAKER_*`) |
 | **Pluggable settlement rails** | Rail | settlement routes through a rail plugin (`sandbox` / `usdc-testnet` / `ach-lite`) — the guard never changes |
 | **2-of-3 multi-sig owners** | Keys | owner control-plane keys are only minted after 2 distinct signers approve |
+| **Multi-tenant orgs** | Keys | orgs with per-org wallets, org-scoped owner keys and auth on wallet routes |
+| **What-if policy simulator** | Sim | replay a wallet's real history against a hypothetical policy and see every would-be block |
+| **On-chain mirror** | Chain | `Guardian.sol` runs the same checks; `PolicyRegistry.sol` seals the active policy hash (live on Sepolia, verified `matches: true`) |
 
 ## Stack
 
@@ -73,8 +81,8 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 68 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig suites
-- **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green
+- **Vitest** — 88 tests across 12 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror
+- **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green; live on Sepolia
 
 ## Getting started
 
@@ -254,15 +262,22 @@ src/
     seed.ts        #   demo constants
     guard.test.ts / signing.test.ts / ledger.test.ts / policy.test.ts /
     risk.test.ts / stepup.test.ts / simulate.test.ts / rails.test.ts /
-    multisig.test.ts
+    multisig.test.ts / orgs.test.ts / chain.test.ts
     test-env.ts    #   in-memory DB env for tests
+  core/chain.ts    #   raw JSON-RPC reader of the deployed Guardian/PolicyRegistry
   app/api/         # payment rail + owner control plane (Route Handlers)
   app/*.tsx        # Command Center, Wallet Registry, Wallet detail,
                    # Transactions, Audit, Agent Simulator
   components/      # dashboard + simulator console + ledger badge
   hooks/use-stream.ts  # SSE client
   app/multisig/     # 2-of-3 signer approval console
-contracts/         # Hardhat: Guardian.sol + PolicyRegistry.sol (on-chain mirror)
+  app/sandbox/      # public playground with one-click attack scenarios
+  app/simulator/    # what-if policy simulator UI
+  app/analytics/    # guard telemetry console
+  app/docs/         # OpenAPI docs
+  app/whitepaper/   # security whitepaper (threat model + attack matrix + tests)
+  contracts/        # Hardhat: Guardian.sol + PolicyRegistry.sol (on-chain mirror)
+  contracts/deployments/sepolia.json  # live deployment artifact (git-ignored)
 scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the real rail
 ```
 
@@ -300,5 +315,5 @@ Migration steps: create the three tables (SQL is emitted on startup via
 
 - Reset demo data before recording (`Reset demo` in Command Center).
 - Already deployed on Vercel with `AEGIS_DB_URL` pointed at Neon PostgreSQL.
-- Add GitHub collaborator `aadityajauhari01@gmail.com` **before** the deadline.
+- GitHub collaborators added before the deadline.
 - **No commits after 2 Aug 2026, 6:00 PM IST.**

@@ -139,13 +139,39 @@ export default function WhitepaperPage() {
         </h2>
         <Card className="p-4">
           <p className="text-sm text-zinc-400">
-            73 unit/integration tests across 10 suites (policy guard, attack-resistance, Ed25519 signing, hash-chain
-            ledger, policy timelock, risk scoring, step-up, what-if simulator, rails, multi-sig, SDK) — plus 10
-            Hardhat tests for the on-chain Guardian. Every defense in the matrix above has a named test proving it,
-            including the limit-split attack, replay rejection, freeze-bypass attempts, and ledger tamper detection.
+            88 unit/integration tests across 12 suites (policy guard, attack-resistance, Ed25519 signing, hash-chain
+            ledger, policy timelock, risk scoring, step-up, what-if simulator, rails, multi-sig, orgs, on-chain
+            mirror) — plus 10 Hardhat tests for the on-chain Guardian. Every defense in the matrix above has a named
+            test proving it, including the limit-split attack, replay rejection, freeze-bypass attempts, and ledger
+            tamper detection.
           </p>
           <p className="mt-3 font-mono text-xs text-emerald-300">
-            $ npm test &nbsp;→&nbsp; 10 files, 73 passed &nbsp;·&nbsp; $ cd contracts &amp;&amp; npx hardhat test &nbsp;→&nbsp; 10 passed
+            $ npm test &nbsp;→&nbsp; 12 files, 88 passed &nbsp;·&nbsp; $ cd contracts &amp;&amp; npx hardhat test &nbsp;→&nbsp; 10 passed
+          </p>
+        </Card>
+      </section>
+
+      <section>
+        <h2 className="mb-3 flex items-center gap-2 font-mono text-sm font-semibold text-zinc-200">
+          <Lock size={15} className="text-emerald-400" /> On-chain seal (live on Sepolia)
+        </h2>
+        <Card className="p-4 text-sm text-zinc-400">
+          <p>
+            The active policy hash is sealed on-chain so a compromised server can never silently rewrite the
+            limits a judge reads. Live deployment (chain: Sepolia):
+          </p>
+          <ul className="mt-3 space-y-1.5 font-mono text-xs text-zinc-300">
+            <li>Guardian&nbsp; <span className="text-zinc-500">0xbdA598ffF1245E8cF147cfe3F99e4c49204C5343</span></li>
+            <li>PolicyRegistry&nbsp; <span className="text-zinc-500">0x629Be710c67f666b7b3eFEB0c16831Ea28E0BEA1</span></li>
+            <li>Sealed hash&nbsp; <span className="text-zinc-500">0x892c1ba5353f9857136fdf59cf826a88cbf209b7a0c6f18192777268d3c1dfc1</span></li>
+            <li>Guardian limits&nbsp; per-tx 100 · daily 1000 · velocity 30/60s</li>
+          </ul>
+          <p className="mt-3 text-sm text-zinc-400">
+            <code className="font-mono text-xs text-emerald-300">GET /api/guardian</code> compares the app-side
+            <code className="font-mono text-xs text-emerald-300">policyHash()</code> (SHA-256 of the active policy
+            JSON) against the on-chain seal and reports <code className="font-mono text-xs text-emerald-300">matches: true</code>
+            only when they are byte-identical. The Guardian&apos;s <code className="font-mono text-xs">revoke()</code> is
+            one-way — no agent and no stolen key can un-freeze it.
           </p>
         </Card>
       </section>
