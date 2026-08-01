@@ -442,6 +442,27 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Full request audit (B4): every owner/agent API call with IP + user-agent.
+    version: 7,
+    name: "request-audit",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS request_audit (
+          id TEXT PRIMARY KEY,
+          ts BIGINT NOT NULL,
+          method TEXT NOT NULL,
+          path TEXT NOT NULL,
+          key_hash TEXT,
+          scope TEXT,
+          wallet_id TEXT,
+          ip TEXT,
+          user_agent TEXT,
+          result TEXT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -2365,4 +2386,80 @@ export async function rejectApproval(id: string, signerId: string): Promise<Appr
   });
   const updated = await getApproval(id);
   return updated!;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Request audit (B4)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface RequestAuditEntry {
+  id: string;
+  ts: number;
+  method: string;
+  path: string;
+  keyHash?: string;
+  scope?: string;
+  walletId?: string;
+  ip?: string;
+  userAgent?: string;
+  result: string;
+}
+
+export async function recordRequestAudit(input: {
+  method: string;
+  path: string;
+  keyHash?: string;
+  scope?: string;
+  walletId?: string;
+  ip?: string;
+  userAgent?: string;
+  result: string;
+}): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "INSERT INTO request_audit (id, ts, method, path, key_hash, scope, wallet_id, ip, user_agent, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      randomUUID(),
+      Date.now(),
+      input.method,
+      input.path,
+      input.keyHash ?? null,
+      input.scope ?? null,
+      input.walletId ?? null,
+      input.ip ?? null,
+      input.userAgent ? String(input.userAgent).slice(0, 256) : null,
+      input.result,
+    ],
+  );
+}
+
+export async function listRequestAudit(limit = 200): Promise<RequestAuditEntry[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM request_audit ORDER BY ts DESC LIMIT ?",
+    [limit],
+  );
+  return rows.map((r) => {
+    const row = r as Record<string, unknown>;
+    return {
+      id: row.id as string,
+      ts: Number(row.ts),
+      method: row.method as string,
+      path: row.path as string,
+      keyHash: row.key_hash ? (row.key_hash as string) : undefined,
+      scope: row.scope ? (row.scope as string) : undefined,
+      walletId: row.wallet_id ? (row.wallet_id as string) : undefined,
+      ip: row.ip ? (row.ip as string) : undefined,
+      userAgent: row.user_agent ? (row.user_agent as string) : undefined,
+      result: row.result as string,
+    };
+  });
+}
+
+export async function resetRequestAudit(): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("DELETE FROM request_audit");
 }
