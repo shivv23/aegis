@@ -11,6 +11,14 @@ counterparties, and an owner-controlled kill switch that an agent cannot
 read, modify, or bypass — because none of the controls live in the agent's
 own logic.
 
+## Live demo
+
+Deployed on Vercel against a Neon PostgreSQL ledger (persistent, tamper-evident):
+
+- **Dashboard:** https://aegis-shivv23s-projects.vercel.app
+- **API (demo):** `GET /api/bootstrap` hands the UI the demo owner key; agent
+  keys are minted per-wallet and Ed25519-signed transfers hit `POST /api/rail/transfer`
+
 ---
 
 ## The thesis
@@ -246,6 +254,6 @@ Migration steps: create the three tables (SQL is emitted on startup via
 ## Demo hygiene for submission
 
 - Reset demo data before recording (`Reset demo` in Command Center).
-- Deploy on Vercel; set `AEGIS_DB_URL` to a Turso instance for persistence.
+- Already deployed on Vercel with `AEGIS_DB_URL` pointed at Neon PostgreSQL.
 - Add GitHub collaborator `aadityajauhari01@gmail.com` **before** the deadline.
 - **No commits after 2 Aug 2026, 6:00 PM IST.**
