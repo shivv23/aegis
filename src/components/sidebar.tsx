@@ -14,6 +14,7 @@ import {
   Users,
   BookOpen,
   FileText,
+  BarChart3,
 } from "lucide-react";
 
 const links = [
@@ -25,6 +26,7 @@ const links = [
   { href: "/multisig", label: "Multi-sig", icon: Users },
   { href: "/docs", label: "API Docs", icon: BookOpen },
   { href: "/whitepaper", label: "Whitepaper", icon: FileText },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
 ];
 
 export function Sidebar() {
