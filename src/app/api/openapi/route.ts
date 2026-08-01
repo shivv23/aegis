@@ -66,6 +66,13 @@ const spec = {
       get: { summary: "View wallet + active policy." },
       patch: { summary: "Edit policy (timelocked)." },
     },
+    "/api/orgs": {
+      get: { summary: "List organizations (multi-tenant workspaces)." },
+      post: { summary: "Create an organization." },
+    },
+    "/api/orgs/{id}": {
+      get: { summary: "View an organization + its wallets." },
+    },
     "/api/wallet/{id}/freeze": { post: { summary: "Engage the kill switch." } },
     "/api/wallet/{id}/unfreeze": { post: { summary: "Release the kill switch." } },
     "/api/transactions": { get: { summary: "Ledger view." } },
@@ -84,7 +91,7 @@ const spec = {
     "/api/breaker": { get: { summary: "Circuit-breaker state per wallet." } },
     "/api/simulate": { post: { summary: "What-if: replay history against a hypothetical policy." } },
     "/api/rails": { get: { summary: "Active settlement rail + available rails." } },
-    "/api/guardian": { get: { summary: "On-chain mirror: Guardian/PolicyRegistry addresses + sealed policy hash." } },
+    "/api/guardian": { get: { summary: "On-chain mirror: Guardian/PolicyRegistry addresses, live contract state (paused/limits) and the sealed policy hash with match proof." } },
     "/api/signers": {
       get: { summary: "List multi-sig signers." },
       post: { summary: "Register a signer (master key only)." },

@@ -58,5 +58,6 @@ python/*.egg-info/
 /contracts/cache/
 /contracts/typechain-types/
 /contracts/node_modules/
+/contracts/deployments/
 
 .vercel

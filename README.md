@@ -88,6 +88,12 @@ npm run typecheck
 # on-chain mirror (optional, no network needed)
 cd contracts && npm install && npx hardhat test
 cd contracts && npx hardhat run scripts/deploy.ts   # deploy + seal locally
+
+# real Sepolia deployment (needs a funded testnet key)
+$env:AEGIS_DEPLOYER_KEY="0x..."            # funded Sepolia private key
+$env:AEGIS_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"   # optional
+cd contracts && npx hardhat run scripts/deploy.ts --network sepolia
+# writes contracts/deployments/sepolia.json + prints the Vercel env vars to set
 ```
 
 First run seeds a demo wallet (`TradingBot-42`, daily limit $1000, 3
@@ -112,8 +118,12 @@ const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: 
   bearer token is worthless without the private key.
 - Also exposes `mintAgentKey`, `scopedKeys`, `createWallet`, `freeze`,
   `unfreeze`, `patchPolicy`, `revoke`, `stepUp`, `verifyLedger`, `rails`,
-  `guardian`, `breaker`, multi-sig signer/approval flows — see
+  `guardian`, `breaker`, multi-sig signer/approval flows, and **multi-tenant
+  orgs** (`createOrg`, `listOrgs`, `getOrg`, `listOrgWallets`) — see
   `src/lib/sdk.ts` (+ `sdk.test.ts`, 5 tests).
+- A **Python SDK** (`python/aegis/sdk.py`) mirrors the TypeScript API for
+  agent stacks in Python — `python/tests/test_sdk.py` (6 tests),
+  `python/examples/agent_demo.py` (hostile-agent demo).
 - `scripts/agent-sim.ts` runs the hostile-agent demo through the SDK.
 
 ## Product pages
@@ -147,7 +157,9 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `GET` | `/api/breaker` | Circuit-breaker state per wallet |
 | `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
 | `GET` | `/api/rails` | Active settlement rail + available rails |
-| `GET` | `/api/guardian` | On-chain mirror: Guardian/PolicyRegistry addresses + sealed policy hash |
+| `GET` | `/api/guardian` | On-chain mirror: addresses, **live** paused/limits, sealed policy hash + match proof |
+| `GET/POST` | `/api/orgs` | List / create multi-tenant organizations |
+| `GET` | `/api/orgs/:id` | Organization + its wallets |
 | `GET/POST` | `/api/signers` | List / register multi-sig signers (register is master-key only) |
 | `DELETE` | `/api/signers/:id` | Remove a signer (master key only) |
 | `GET/POST` | `/api/approvals` | List / propose an owner-key issuance (2-of-3) |
@@ -275,6 +287,8 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_RPC_URL` | unset | chain RPC for the on-chain mirror |
 | `AEGIS_CHAIN_NAME` | `hardhat (local)` | label for the sealed-policy explorer link |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
+| `AEGIS_DEPLOYER_KEY` | unset | funded Sepolia private key for `hardhat run --network sepolia` |
+| `AEGIS_ETHERSCAN_KEY` | unset | optional; enables contract verification on Sepolia |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set
 `AEGIS_DB_URL=postgres://user:pass@host:5432/db` and the ledger runs on
