@@ -13,6 +13,7 @@ import {
   FlaskConical,
   Users,
   BookOpen,
+  FileText,
 } from "lucide-react";
 
 const links = [
@@ -23,6 +24,7 @@ const links = [
   { href: "/sandbox", label: "Policy Sandbox", icon: FlaskConical },
   { href: "/multisig", label: "Multi-sig", icon: Users },
   { href: "/docs", label: "API Docs", icon: BookOpen },
+  { href: "/whitepaper", label: "Whitepaper", icon: FileText },
 ];
 
 export function Sidebar() {
