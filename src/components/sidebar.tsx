@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   FlaskConical,
   Users,
+  BookOpen,
 } from "lucide-react";
 
 const links = [
@@ -21,6 +22,7 @@ const links = [
   { href: "/simulator", label: "Agent Simulator", icon: Bot },
   { href: "/sandbox", label: "Policy Sandbox", icon: FlaskConical },
   { href: "/multisig", label: "Multi-sig", icon: Users },
+  { href: "/docs", label: "API Docs", icon: BookOpen },
 ];
 
 export function Sidebar() {
