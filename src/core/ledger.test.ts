@@ -43,6 +43,17 @@ describe("tamper-evident ledger", () => {
     expect(proof.intact).toBe(true);
   });
 
+  it("rechaining only one table breaks the interleaved chain; rechaining both repairs it", async () => {
+    const s = getStore();
+    const { rechain } = await import("@/core/ledger");
+    // Reproduces the v3 bug: rechain transactions alone.
+    await rechain(s.client, ["transactions"]);
+    expect((await verifyLedger()).intact).toBe(false);
+    // The v4 repair: rechain both tables.
+    await rechain(s.client, ["transactions", "audit"]);
+    expect((await verifyLedger()).intact).toBe(true);
+  });
+
   it("hashes integer units, so a float-only edit is caught too", async () => {
     const fresh = await createTransaction({
       walletId: SEED_WALLET_ID,

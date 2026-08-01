@@ -350,7 +350,9 @@ const MIGRATIONS: Migration[] = [
     // Integer money on the ledger path: every transaction row gains an
     // amount_units column (integer units at display precision). The hash
     // chain already covers these units; this migration backfills the column
-    // and rechains existing rows so verify() stays consistent.
+    // and rechains existing rows so verify() stays consistent. BOTH ledger
+    // tables are rechained — transactions and audit share one interleaved
+    // sequence, so touching one without the other breaks the chain.
     version: 3,
     name: "money-units",
     up: async (client) => {
@@ -368,7 +370,17 @@ const MIGRATIONS: Migration[] = [
           [unitsFromFloat(Number(r.amount), 2).toString(), r.id],
         );
       }
-      await rechain(client, ["transactions"]);
+      await rechain(client, ["transactions", "audit"]);
+    },
+  },
+  {
+    // Repair for v3: an early run rechained only `transactions`, which
+    // desynced the shared transaction/audit sequence on existing databases.
+    // Rechaining both tables restores a consistent interleaved chain.
+    version: 4,
+    name: "rechain-both",
+    up: async (client) => {
+      await rechain(client, ["transactions", "audit"]);
     },
   },
 ];
