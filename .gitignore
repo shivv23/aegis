@@ -46,3 +46,9 @@ next-env.d.ts
 
 # internal planning docs (never pushed)
 /plan.md
+
+# hardhat / solidity build artifacts (contracts package)
+/contracts/artifacts/
+/contracts/cache/
+/contracts/typechain-types/
+/contracts/node_modules/

@@ -65,6 +65,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
 - **Vitest** — 59 tests incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail suites
+- **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green
 
 ## Getting started
 
@@ -74,6 +75,10 @@ npm run dev        # http://localhost:3000
 npm test           # policy guard + attack-resistance suite
 npm run sim        # CLI agent simulator (needs AGENT_KEY env)
 npm run typecheck
+
+# on-chain mirror (optional, no network needed)
+cd contracts && npm install && npx hardhat test
+cd contracts && npx hardhat run scripts/deploy.ts   # deploy + seal locally
 ```
 
 First run seeds a demo wallet (`TradingBot-42`, daily limit $1000, 3
@@ -102,6 +107,7 @@ All endpoints require `Authorization: Bearer <key>`.
 | `GET` | `/api/breaker` | Circuit-breaker state per wallet |
 | `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
 | `GET` | `/api/rails` | Active settlement rail + available rails |
+| `GET` | `/api/guardian` | On-chain mirror: Guardian/PolicyRegistry addresses + sealed policy hash |
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
@@ -150,6 +156,10 @@ PENDING ── owner revokes / wallet frozen ──▶ REVOKED (IN_FLIGHT_REVOKE
    before it enters the settlement window. Critical risk is rejected outright.
 10. **Self-defending.** The circuit breaker counts guard anomalies and
     auto-freezes a wallet that looks compromised before a human notices.
+11. **On-chain mirror.** The same checks run in `contracts/Guardian.sol`; the
+    active policy hash is sealed in `contracts/PolicyRegistry.sol` — a
+    compromised server can't silently rewrite the limits. `revoke()` on-chain
+    is one-way: no agent, and no stolen key, can un-freeze it.
 
 ## Demo script (5 minutes)
 
@@ -189,6 +199,7 @@ src/
                    # Transactions, Audit, Agent Simulator
   components/      # dashboard + simulator console + ledger badge
   hooks/use-stream.ts  # SSE client
+contracts/         # Hardhat: Guardian.sol + PolicyRegistry.sol (on-chain mirror)
 scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the real rail
 ```
 
@@ -206,6 +217,10 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_BREAKER_WINDOW_MS` | `60000` | circuit-breaker observation window |
 | `AEGIS_RAIL` | `sandbox` | active settlement rail: `sandbox`, `usdc-testnet`, or `ach-lite` |
 | `AEGIS_USDC_RAIL_URL` | unset | optional gateway URL for real USDC settlement |
+| `AEGIS_GUARDIAN_ADDRESS` | unset | deployed `Guardian` address (shown on `/api/guardian`) |
+| `AEGIS_POLICY_REGISTRY` | unset | deployed `PolicyRegistry` address |
+| `AEGIS_RPC_URL` | unset | chain RPC for the on-chain mirror |
+| `AEGIS_CHAIN_NAME` | `hardhat (local)` | label for the sealed-policy explorer link |
 | `AEGIS_DEMO_MODE` | `1` | set `0` to disable bootstrap/reset |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set
