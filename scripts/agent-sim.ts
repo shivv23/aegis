@@ -2,22 +2,20 @@
 /**
  * AEGIS — standalone autonomous-agent simulator.
  *
- * Acts exactly like a real agent calling the rail. Supports two auth modes:
- *  1. Ed25519 SIGNED requests (preferred) — the agent IS its keypair.
+ * Built on the AEGIS SDK (src/lib/sdk.ts) — the exact surface a real agent
+ * integrates with. The agent holds ONLY its credentials and can call exactly
+ * one thing: `transfer()`. The guard decides what happens — not this script.
+ *
+ * Two auth modes:
+ *  1. Ed25519 SIGNED (preferred) — the agent IS its keypair.
  *     Provide the private key minted from POST /api/keys/mint.
  *  2. Legacy scoped agent JWT (migration mode).
  *
- * The agent holds ONLY its key and can do nothing but request transfers.
- * The guard decides what happens — not this script.
- *
  * Usage (signed):
- *   AGENT_PRIVATE_KEY=<pkcs8-b64url> AGENT_WALLET=<id> node scripts/agent-sim.ts
+ *   AGENT_PRIVATE_KEY=<pkcs8-b64url> AGENT_WALLET=<id> npm run sim
  *   AGENT_BASE_URL=http://localhost:3000 (optional)
- *
- * Usage (legacy JWT):
- *   AGENT_KEY=<jwt> AGENT_WALLET=<id> node scripts/agent-sim.ts
  */
-import { createPrivateKey, randomUUID, sign } from "node:crypto";
+import { Aegis } from "../src/lib/sdk";
 
 const BASE = process.env.AGENT_BASE_URL ?? "http://localhost:3000";
 const WALLET = process.env.AGENT_WALLET ?? "wallet-tradingbot-42";
@@ -32,65 +30,11 @@ if (!PRIVATE_KEY && !LEGACY_KEY) {
   process.exit(1);
 }
 
-function canonicalMessage(req: {
-  walletId: string;
-  nonce: string;
-  requestedAt: number;
-  to: string;
-  amount: number;
-  purpose: string;
-}): string {
-  return [
-    "aegis-agent-transfer",
-    "v1",
-    req.walletId,
-    req.nonce,
-    req.requestedAt,
-    req.to,
-    req.amount,
-    req.purpose,
-  ].join("|");
-}
-
-async function transfer(to: string, amount: number, purpose: string) {
-  const nonce = randomUUID();
-  const requestedAt = Date.now();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  const body = { to, amount, purpose, nonce };
-
-  if (PRIVATE_KEY) {
-    const key = createPrivateKey({
-      key: Buffer.from(PRIVATE_KEY, "base64url"),
-      type: "pkcs8",
-      format: "der",
-    });
-    const message = canonicalMessage({
-      walletId: WALLET,
-      nonce,
-      requestedAt,
-      to,
-      amount,
-      purpose,
-    });
-    headers["x-aegis-wallet"] = WALLET;
-    headers["x-aegis-timestamp"] = String(requestedAt);
-    headers["x-aegis-signature"] = sign(null, Buffer.from(message), key).toString(
-      "base64url",
-    );
-  } else {
-    headers["Authorization"] = `Bearer ${LEGACY_KEY}`;
-  }
-
-  const res = await fetch(`${BASE}/api/rail/transfer`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  const json = await res.json();
-  return { status: res.status, body: json };
-}
+const agent = new Aegis(
+  PRIVATE_KEY
+    ? { baseUrl: BASE, walletId: WALLET, privateKey: PRIVATE_KEY }
+    : { baseUrl: BASE, apiKey: LEGACY_KEY },
+);
 
 const plan = [
   { to: "compute:0xCAFE0001", amount: 30, purpose: "GPU burst" },
@@ -102,17 +46,17 @@ const plan = [
 ];
 
 console.log(
-  `\n  AEGIS AGENT SIM — wallet ${WALLET} [${
+  `\n  AEGIS AGENT SIM (SDK) — wallet ${WALLET} [${
     PRIVATE_KEY ? "Ed25519 signed" : "legacy JWT"
   }]\n`,
 );
 void (async () => {
   for (const step of plan) {
-    const { status, body } = await transfer(step.to, step.amount, step.purpose);
-    const state = body.status2 ?? body.status ?? body.error;
+    const r = await agent.transfer(step);
+    const state = (r.body.status2 as string) ?? (r.body.status as string) ?? (r.body.error as string);
     console.log(
       `  ${step.amount.toString().padStart(6)} → ${step.to.padEnd(18)} ` +
-        `${state.padEnd(10)} [HTTP ${status}] ${body.details ?? body.reason ?? ""}`,
+        `${state.padEnd(10)} [HTTP ${r.status}] ${r.body.details ?? r.body.reason ?? ""}`,
     );
   }
   console.log("\n  Done. The guard allowed only what the policy allowed.\n");

@@ -81,8 +81,8 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 ```bash
 npm install
 npm run dev        # http://localhost:3000
-npm test           # policy guard + attack-resistance suite
-npm run sim        # CLI agent simulator (needs AGENT_KEY env)
+npm test           # policy guard + attack-resistance + SDK suites
+npm run sim        # CLI agent simulator, built on the SDK
 npm run typecheck
 
 # on-chain mirror (optional, no network needed)
@@ -92,6 +92,29 @@ cd contracts && npx hardhat run scripts/deploy.ts   # deploy + seal locally
 
 First run seeds a demo wallet (`TradingBot-42`, daily limit $1000, 3
 allowlisted vendors) so the dashboard is alive immediately.
+
+## SDK — the only thing an agent should ever hold
+
+```ts
+import { Aegis } from "@/lib/sdk";
+
+const agent = new Aegis({
+  baseUrl: "https://aegis-shivv23s-projects.vercel.app",
+  walletId: "wallet-tradingbot-42",
+  privateKey: process.env.AGENT_PRIVATE_KEY, // Ed25519 pkcs8 (base64url)
+});
+
+const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: "GPU burst" });
+// { ok: true, status: 201, body: { status: "PENDING", ... } }
+```
+
+- Every transfer is **Ed25519-signed** — the agent *is* its keypair; a leaked
+  bearer token is worthless without the private key.
+- Also exposes `mintAgentKey`, `scopedKeys`, `createWallet`, `freeze`,
+  `unfreeze`, `patchPolicy`, `revoke`, `stepUp`, `verifyLedger`, `rails`,
+  `guardian`, `breaker`, multi-sig signer/approval flows — see
+  `src/lib/sdk.ts` (+ `sdk.test.ts`, 5 tests).
+- `scripts/agent-sim.ts` runs the hostile-agent demo through the SDK.
 
 ## API
 
