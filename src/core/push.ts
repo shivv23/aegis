@@ -84,6 +84,38 @@ export async function deliverSlack(entry: OutboxEntry): Promise<boolean> {
 }
 
 /** Sends the event to Resend (if configured). */
+/** Sends a magic sign-in link to an arbitrary recipient (1.1). */
+export async function sendMagicLinkEmail(
+  to: string,
+  link: string,
+): Promise<boolean> {
+  const resendKey = process.env.AEGIS_RESEND_API_KEY;
+  const from = process.env.AEGIS_EMAIL_FROM;
+  if (!resendKey || !from) return false;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${resendKey}`,
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        subject: "[AEGIS] Your sign-in link",
+        html: `
+          <h2>Sign in to AEGIS</h2>
+          <p>Use this link to sign in — it expires in 10 minutes.</p>
+          <p><a href="${link}">${link}</a></p>
+        `,
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function deliverEmail(entry: OutboxEntry): Promise<boolean> {
   const resendKey = process.env.AEGIS_RESEND_API_KEY;
   const emailTo = process.env.AEGIS_EMAIL_TO;

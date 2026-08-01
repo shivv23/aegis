@@ -463,6 +463,24 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Magic-link sessions (1.1): owner identity in a revocable cookie session.
+    version: 8,
+    name: "auth-sessions",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          email TEXT NOT NULL,
+          created_at BIGINT NOT NULL,
+          last_used_at BIGINT NOT NULL,
+          ip TEXT,
+          user_agent TEXT,
+          revoked_at BIGINT
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -2462,4 +2480,85 @@ export async function resetRequestAudit(): Promise<void> {
   const s = getStore();
   await s.ready;
   await s.client.execute("DELETE FROM request_audit");
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Auth sessions (1.1)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface AuthSession {
+  id: string;
+  email: string;
+  createdAt: number;
+  lastUsedAt: number;
+  ip?: string;
+  userAgent?: string;
+  revokedAt?: number;
+}
+
+export async function createSession(input: {
+  email: string;
+  ip?: string;
+  userAgent?: string;
+}): Promise<AuthSession> {
+  const s = getStore();
+  await s.ready;
+  const now = Date.now();
+  const session: AuthSession = {
+    id: randomUUID(),
+    email: input.email.toLowerCase(),
+    createdAt: now,
+    lastUsedAt: now,
+    ip: input.ip,
+    userAgent: input.userAgent,
+  };
+  await s.client.execute(
+    "INSERT INTO sessions (id, email, created_at, last_used_at, ip, user_agent, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+    [session.id, session.email, session.createdAt, session.lastUsedAt, session.ip ?? null, session.userAgent ?? null],
+  );
+  return session;
+}
+
+export async function getSession(id: string): Promise<AuthSession | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM sessions WHERE id = ?", [id]);
+  if (rows.length === 0) return null;
+  return rowToSession(rows[0] as Record<string, unknown>);
+}
+
+export async function touchSession(id: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("UPDATE sessions SET last_used_at = ? WHERE id = ?", [Date.now(), id]);
+}
+
+export async function listSessions(email?: string): Promise<AuthSession[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = email
+    ? await s.client.execute("SELECT * FROM sessions WHERE email = ? ORDER BY last_used_at DESC", [email])
+    : await s.client.execute("SELECT * FROM sessions ORDER BY last_used_at DESC");
+  return rows.map((r) => rowToSession(r as Record<string, unknown>));
+}
+
+export async function revokeSession(id: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  const existing = await getSession(id);
+  if (!existing) return false;
+  await s.client.execute("UPDATE sessions SET revoked_at = ? WHERE id = ?", [Date.now(), id]);
+  return true;
+}
+
+function rowToSession(r: Record<string, unknown>): AuthSession {
+  return {
+    id: r.id as string,
+    email: r.email as string,
+    createdAt: Number(r.created_at),
+    lastUsedAt: Number(r.last_used_at),
+    ip: r.ip ? (r.ip as string) : undefined,
+    userAgent: r.user_agent ? (r.user_agent as string) : undefined,
+    revokedAt: r.revoked_at ? Number(r.revoked_at) : undefined,
+  };
 }

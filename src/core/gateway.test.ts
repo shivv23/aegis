@@ -12,7 +12,7 @@ afterEach(() => {
 describe("rate limiting (B3)", () => {
   it("allows requests within capacity and counts down", () => {
     process.env.AEGIS_RL_KEY_CAP = "3";
-    process.env.AEGIS_RL_KEY_RPS = "1000";
+    process.env.AEGIS_RL_KEY_RPS = "0.001";
     const keyHash = "k".repeat(64);
     const r1 = checkRateLimit({ keyHash, ip: "1.2.3.4" });
     const r2 = checkRateLimit({ keyHash, ip: "1.2.3.4" });
@@ -35,7 +35,7 @@ describe("rate limiting (B3)", () => {
 
   it("limits per IP independently of the key", () => {
     process.env.AEGIS_RL_IP_CAP = "2";
-    process.env.AEGIS_RL_IP_RPS = "1000";
+    process.env.AEGIS_RL_IP_RPS = "0.001";
     process.env.AEGIS_RL_KEY_CAP = "100";
     expect(checkRateLimit({ keyHash: "a".repeat(64), ip: "7.7.7.7" }).ip.ok).toBe(true);
     expect(checkRateLimit({ keyHash: "b".repeat(64), ip: "7.7.7.7" }).ip.ok).toBe(true);

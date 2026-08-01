@@ -16,6 +16,7 @@ import {
   FileText,
   BarChart3,
   Webhook,
+  KeyRound,
   Home,
 } from "lucide-react";
 
@@ -25,7 +26,8 @@ const links = [
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/audit", label: "Audit Trail", icon: ScrollText },
   { href: "/webhooks", label: "Webhooks", icon: Webhook },
-  { href: "/simulator", label: "Agent Simulator", icon: Bot },
+  { href: "/sessions", label: "Sessions", icon: KeyRound },
+  { href: "/auth", label: "Sign In", icon: ShieldCheck },
   { href: "/sandbox", label: "Policy Sandbox", icon: FlaskConical },
   { href: "/multisig", label: "Multi-sig", icon: Users },
   { href: "/docs", label: "API Docs", icon: BookOpen },
