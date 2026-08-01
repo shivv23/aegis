@@ -97,6 +97,17 @@ describe("Aegis SDK", () => {
     expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer jwt-token");
   });
 
+  it("forwards an idempotency key on transfers for retry-safe settlement", async () => {
+    const fetchMock = mockFetch(201, { status: "PENDING", id: "tx-idem" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const aegis = new Aegis({ baseUrl: "https://example.com", apiKey: "jwt-token" });
+    await aegis.transfer({ to: "compute:0xCAFE0001", amount: 30, idempotencyKey: "e2e-key-1" });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["idempotency-key"]).toBe("e2e-key-1");
+  });
+
   it("propagates guard denials instead of throwing", async () => {
     const fetchMock = mockFetch(403, { error: "Not allowed", reason: "NOT_ALLOWLISTED" });
     vi.stubGlobal("fetch", fetchMock);

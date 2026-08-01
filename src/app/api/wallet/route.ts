@@ -34,7 +34,13 @@ export async function POST(req: NextRequest) {
   const { name, ownerDid, balance, policy } = parsed.data;
 
   // Org-scoped owner keys can only create wallets inside their own org.
-  const orgId = claims?.orgId ?? parsed.data.orgId;
+  // If no org is given, infer one from a did:org:<id> ownerDid so the wallet
+  // joins the org fleet (and the org kill-switch can gate it).
+  let orgId = claims?.orgId ?? parsed.data.orgId;
+  if (!orgId && ownerDid.startsWith("did:org:")) {
+    const inferred = ownerDid.slice("did:org:".length);
+    if (await getOrg(inferred)) orgId = inferred;
+  }
   if (orgId) {
     const org = await getOrg(orgId);
     if (!org) return error("Organization not found", 404);

@@ -44,6 +44,8 @@ export interface AegisTransferInput {
   to: string;
   amount: number;
   purpose?: string;
+  /** Optional idempotency key: a replayed key returns the original result instead of double-settling. */
+  idempotencyKey?: string;
 }
 
 const CANONICAL_TAG = "aegis-agent-transfer";
@@ -95,6 +97,7 @@ export class Aegis {
       nonce,
     };
     const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (input.idempotencyKey) headers["idempotency-key"] = input.idempotencyKey;
 
     if (this.privateKey) {
       const message = Aegis.canonicalMessage({ ...input, walletId: this.walletId!, nonce, requestedAt });
@@ -136,6 +139,8 @@ export class Aegis {
       velocityLimitPerMin: number;
       allowlist: string[];
     };
+    /** Optional org to join (auto-inferred from a did:org:<id> ownerDid when omitted). */
+    orgId?: string;
   }): Promise<AegisResponse> {
     return this.request("/api/wallet", { method: "POST", body: input });
   }
