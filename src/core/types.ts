@@ -31,12 +31,16 @@ export interface Wallet {
   orgId?: string;
   /** Settlement rail this wallet prefers (A2); falls back to AEGIS_RAIL env. */
   preferredRail?: string;
+  /** D4: which level (org/team/wallet) supplied each effective policy field. */
+  effectiveSources?: Record<string, string>;
 }
 
 export interface Organization {
   id: string;
   name: string;
   createdAt: number;
+  /** Org-level default policy (D4): inherited by every team and wallet below. */
+  policy?: WalletPolicy;
 }
 
 export type CounterpartyStatus = "ACTIVE" | "FLAGGED" | "BLOCKED";
@@ -60,6 +64,8 @@ export interface BudgetGroup {
   monthlyLimit: number;
   walletIds: string[];
   createdAt: number;
+  /** Team-level policy (D4): caps inherited org defaults; wallet overrides tighten. */
+  policy?: WalletPolicy;
 }
 
 export type EscrowStatus = "HELD" | "RELEASED" | "REFUNDED" | "EXPIRED";

@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
-import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, getWallet, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, settleDue, touchAgentKey } from "@/core/store";
+import { HOLD_MS, STEP_UP_TTL_MS, addAudit, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, groupSpendLast30d, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, resolveEffectiveWallet, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
 import { decisionLink } from "@/core/approval-links";
@@ -112,7 +112,7 @@ async function executeTransfer(input: {
 
   await settleDue();
   await expireStepUps(now);
-  const wallet = await getWallet(walletId);
+  const wallet = await resolveEffectiveWallet(walletId);
   if (!wallet) return error("Wallet not found", 404);
   const history = await listTransactions(wallet.id);
   const context = spendContext(wallet.id, now, history);

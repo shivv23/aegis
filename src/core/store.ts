@@ -35,6 +35,7 @@ import { unitsFromFloat } from "./money";
 import { decryptSecret, encryptSecret, secretsEnabled } from "./secrets";
 import { getRail } from "./rails";
 import { computeFee } from "./usage";
+import { mergePolicy } from "./delegation";
 import { signKey } from "./keys";
 import { SEED_ORG_ID, SEED_VENDORS, SEED_WALLET_ID } from "./seed";
 export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
@@ -537,6 +538,20 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Delegation tree (D4): orgs and teams carry policy defaults that wallets
+    // inherit. The guard runs against the merged (effective) policy.
+    version: 11,
+    name: "delegation-tree",
+    up: async (client) => {
+      if (!(await hasColumn(client, "orgs", "policy"))) {
+        await client.execute("ALTER TABLE orgs ADD COLUMN policy TEXT");
+      }
+      if (!(await hasColumn(client, "budget_groups", "policy"))) {
+        await client.execute("ALTER TABLE budget_groups ADD COLUMN policy TEXT");
+      }
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -938,11 +953,16 @@ export async function listOrgs(): Promise<Organization[]> {
   const s = getStore();
   await s.ready;
   const { rows } = await s.client.execute("SELECT * FROM orgs ORDER BY created_at ASC");
-  return rows.map((r) => ({
-    id: r.id as string,
-    name: r.name as string,
-    createdAt: Number(r.created_at),
-  }));
+  return rows.map((r) => rowToOrg(r as Record<string, unknown>));
+}
+
+function rowToOrg(row: Record<string, unknown>): Organization {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    createdAt: Number(row.created_at),
+    policy: row.policy ? (JSON.parse(row.policy as string) as WalletPolicy) : undefined,
+  };
 }
 
 export async function getOrg(id: string): Promise<Organization | null> {
@@ -950,13 +970,15 @@ export async function getOrg(id: string): Promise<Organization | null> {
   await s.ready;
   const { rows } = await s.client.execute("SELECT * FROM orgs WHERE id = ?", [id]);
   const row = rows[0];
-  return row
-    ? {
-        id: row.id as string,
-        name: row.name as string,
-        createdAt: Number(row.created_at),
-      }
-    : null;
+  return row ? rowToOrg(row as Record<string, unknown>) : null;
+}
+
+/** Sets the org-level default policy (D4). Wallet/team policies cap these. */
+export async function updateOrgPolicy(orgId: string, policy: WalletPolicy): Promise<Organization | null> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("UPDATE orgs SET policy = ? WHERE id = ?", [JSON.stringify(policy), orgId]);
+  return getOrg(orgId);
 }
 
 export async function listOrgWallets(orgId: string): Promise<Wallet[]> {
@@ -1068,7 +1090,43 @@ function rowToBudgetGroup(row: Record<string, unknown>, walletIds: string[]): Bu
     monthlyLimit: Number(row.monthly_limit),
     walletIds,
     createdAt: Number(row.created_at),
+    policy: row.policy ? (JSON.parse(row.policy as string) as WalletPolicy) : undefined,
   };
+}
+
+/** Sets the team-level policy (D4). Wallet overrides can only tighten it. */
+export async function updateTeamPolicy(groupId: string, policy: WalletPolicy): Promise<BudgetGroup | null> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("UPDATE budget_groups SET policy = ? WHERE id = ?", [JSON.stringify(policy), groupId]);
+  const group = await getBudgetGroupForWalletById(groupId);
+  return group;
+}
+
+async function getBudgetGroupForWalletById(groupId: string): Promise<BudgetGroup | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM budget_groups WHERE id = ?", [groupId]);
+  const row = rows[0];
+  if (!row) return null;
+  return rowToBudgetGroup(row as Record<string, unknown>, await groupWalletIds(s.client, groupId));
+}
+
+/**
+ * D4: resolves a wallet's effective policy by merging org → team → wallet.
+ * Returns the wallet with a resolved policy (and the per-field source) ready
+ * for the guard.
+ */
+export async function resolveEffectiveWallet(walletId: string): Promise<Wallet | null> {
+  const s = getStore();
+  await s.ready;
+  const wallet = await getWallet(walletId);
+  if (!wallet) return null;
+  const orgPolicy = wallet.orgId ? (await getOrg(wallet.orgId))?.policy : undefined;
+  const group = await getBudgetGroupForWallet(walletId);
+  const teamPolicy = group?.policy;
+  const { policy, sources } = mergePolicy(wallet.policy, orgPolicy, teamPolicy);
+  return { ...wallet, policy, effectiveSources: sources };
 }
 
 async function groupWalletIds(client: Db, groupId: string): Promise<string[]> {
