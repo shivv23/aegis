@@ -111,7 +111,7 @@ async function init(client: Db): Promise<void> {
       monthly_limit REAL NOT NULL,
       velocity_limit_per_min INTEGER NOT NULL,
       allowlist TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at BIGINT NOT NULL
     )
   `);
   await client.execute(`
@@ -124,15 +124,15 @@ async function init(client: Db): Promise<void> {
       purpose TEXT NOT NULL,
       status TEXT NOT NULL,
       rejection_reason TEXT,
-      requested_at INTEGER NOT NULL,
-      pending_until INTEGER,
-      settled_at INTEGER,
-      blocked_at INTEGER,
-      revoked_at INTEGER,
+      requested_at BIGINT NOT NULL,
+      pending_until BIGINT,
+      settled_at BIGINT,
+      blocked_at BIGINT,
+      revoked_at BIGINT,
       nonce TEXT NOT NULL,
       step_up_score REAL,
       external_ref TEXT,
-      seq INTEGER,
+      seq BIGINT,
       prev_hash TEXT,
       hash TEXT,
       canonical TEXT
@@ -145,8 +145,8 @@ async function init(client: Db): Promise<void> {
       actor TEXT NOT NULL,
       action TEXT NOT NULL,
       details TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      seq INTEGER,
+      timestamp BIGINT NOT NULL,
+      seq BIGINT,
       prev_hash TEXT,
       hash TEXT,
       canonical TEXT
@@ -156,7 +156,7 @@ async function init(client: Db): Promise<void> {
     CREATE TABLE IF NOT EXISTS ledger_state (
       id INTEGER PRIMARY KEY,
       head_hash TEXT NOT NULL,
-      row_count INTEGER NOT NULL
+      row_count BIGINT NOT NULL
     )
   `);
   await client.execute(`
@@ -164,8 +164,8 @@ async function init(client: Db): Promise<void> {
       wallet_id TEXT NOT NULL,
       public_key TEXT PRIMARY KEY,
       label TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      revoked_at INTEGER
+      created_at BIGINT NOT NULL,
+      revoked_at BIGINT
     )
   `);
   await client.execute(`
@@ -175,8 +175,8 @@ async function init(client: Db): Promise<void> {
       policy TEXT NOT NULL,
       policy_hash TEXT NOT NULL,
       created_by TEXT NOT NULL,
-      effective_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
+      effective_at BIGINT NOT NULL,
+      created_at BIGINT NOT NULL,
       status TEXT NOT NULL
     )
   `);
@@ -186,8 +186,8 @@ async function init(client: Db): Promise<void> {
       wallet_id TEXT NOT NULL,
       event_type TEXT NOT NULL,
       payload TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      delivered_at INTEGER,
+      created_at BIGINT NOT NULL,
+      delivered_at BIGINT,
       attempt_count INTEGER NOT NULL
     )
   `);
@@ -197,7 +197,7 @@ async function init(client: Db): Promise<void> {
       name TEXT NOT NULL,
       role TEXT NOT NULL,
       enabled INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at BIGINT NOT NULL
     )
   `);
   await client.execute(`
@@ -210,8 +210,8 @@ async function init(client: Db): Promise<void> {
       required INTEGER NOT NULL,
       approvers TEXT NOT NULL,
       status TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL,
+      created_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL,
       key_minted INTEGER NOT NULL
     )
   `);
