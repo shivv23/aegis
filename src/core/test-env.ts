@@ -5,3 +5,4 @@
  */
 process.env.AEGIS_DB_URL = "file::memory:";
 process.env.AEGIS_POLICY_TIMELOCK_MS = "60000";
+process.env.AEGIS_SEED_DEMO = "1";

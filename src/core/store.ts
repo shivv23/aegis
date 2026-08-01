@@ -50,6 +50,14 @@ export const BREAKER_WINDOW_MS = Number(process.env.AEGIS_BREAKER_WINDOW_MS ?? 6
 
 const isDemoMode = () => process.env.AEGIS_DEMO_MODE !== "0";
 
+/**
+ * Opt-in demo seeding. When AEGIS_SEED_DEMO=1 the first boot (and a store
+ * reset) provisions a demo org + wallet + a small fake history so the UI is
+ * instantly explorable. Defaults to OFF so a production store contains only
+ * data created through the real API.
+ */
+const seedDemoEnabled = () => process.env.AEGIS_SEED_DEMO === "1";
+
 /** Policy changes take effect after a timelock. Disabled in demo mode. */
 export const POLICY_TIMELOCK_MS = process.env.AEGIS_POLICY_TIMELOCK_MS
   ? Number(process.env.AEGIS_POLICY_TIMELOCK_MS)
@@ -352,7 +360,7 @@ async function init(client: Db): Promise<void> {
   await applyMigrations(client);
 
   const { rows } = await client.execute("SELECT COUNT(*) AS n FROM wallets");
-  if (Number(rows[0]?.n ?? 0) === 0) {
+  if (Number(rows[0]?.n ?? 0) === 0 && seedDemoEnabled()) {
     await runSeed(client);
   }
 }
@@ -795,7 +803,8 @@ async function runSeed(client: Db): Promise<void> {
   );
 }
 
-export async function resetStore(): Promise<Wallet[]> {
+export async function resetStore(options: { reseed?: boolean } = {}): Promise<Wallet[]> {
+  const reseed = options.reseed ?? seedDemoEnabled();
   const s = getStore();
   await s.ready;
   s.nonces.clear();
@@ -818,7 +827,7 @@ export async function resetStore(): Promise<Wallet[]> {
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
   );
-  await runSeed(s.client);
+  if (reseed) await runSeed(s.client);
   const wallets = await listWallets();
   s.events.emit("reset", wallets);
   return wallets;

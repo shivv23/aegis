@@ -7,6 +7,7 @@ import { Button, Card, StatCard, WalletBadge } from "@/components/ui";
 import { LiveFeed } from "@/components/live-feed";
 import { ownerApi } from "@/lib/api-client";
 import { LedgerBadge } from "@/components/ledger-badge";
+import { GuardianPanel } from "@/components/guardian-panel";
 import { money, shortId } from "@/lib/utils";
 import { Snowflake, Zap, Siren, RotateCcw } from "lucide-react";
 
@@ -99,6 +100,8 @@ export default function CommandCenter() {
         </div>
 
         <div className="xl:col-span-2 space-y-4">
+          <GuardianPanel />
+
           <Card className="flex items-center justify-between border-accent/30">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/15 border border-accent/40">

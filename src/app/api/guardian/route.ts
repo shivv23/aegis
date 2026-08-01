@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { getWallet, policyHash } from "@/core/store";
+import { getWallet, listWallets, policyHash } from "@/core/store";
 import { SEED_WALLET_ID } from "@/core/seed";
 import { readOnChainMirror } from "@/core/chain";
 
@@ -20,7 +20,18 @@ export async function GET(req: NextRequest) {
   const authz = authorize(claims, "owner");
   if (!authz.ok) return error(authz.reason!, 401);
 
-  const wallet = await getWallet(SEED_WALLET_ID);
+  // Prefer the demo seed wallet when present; otherwise compare against the
+  // most recently created active wallet so the seal check always uses a real
+  // wallet policy rather than a hardcoded one.
+  let wallet = await getWallet(SEED_WALLET_ID);
+  let walletId = SEED_WALLET_ID;
+  if (!wallet) {
+    const all = await listWallets();
+    const active = all.filter((w) => w.status === "ACTIVE");
+    const candidate = active[active.length - 1] ?? all[all.length - 1] ?? null;
+    wallet = candidate;
+    walletId = candidate?.id ?? null;
+  }
   const hash = wallet ? policyHash(wallet.policy) : null;
   const onChain = await readOnChainMirror();
 
@@ -28,6 +39,7 @@ export async function GET(req: NextRequest) {
   const matches = hash !== null && sealed !== undefined && sealed === "0x" + hash.toLowerCase();
 
   return json({
+    wallet: walletId,
     guardian: {
       address: process.env.AEGIS_GUARDIAN_ADDRESS ?? null,
       registry: process.env.AEGIS_POLICY_REGISTRY ?? null,
