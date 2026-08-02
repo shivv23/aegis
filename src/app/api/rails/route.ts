@@ -1,14 +1,24 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { getRail, listRails } from "@/core/rails";
+import { getRail, listRails, railIsSimulated } from "@/core/rails";
 import { getWallet, setWalletPreferredRail } from "@/core/store";
 
 export const runtime = "nodejs";
 
+function railStatus(id: string) {
+  return {
+    simulated: railIsSimulated(id),
+    reason: railIsSimulated(id)
+      ? "No external gateway configured — settles with a deterministic simulated reference."
+      : "Live settlement via the external gateway.",
+  };
+}
+
 /**
  * GET   /api/rails
  * The settlement rails the guard can route money through, and the default
- * active rail (AEGIS_RAIL env).
+ * active rail (AEGIS_RAIL env). Each rail reports whether it is currently
+ * settling live or simulated, so the UI never over-claims real money movement.
  *
  * PATCH /api/rails  {walletId, rail}
  * Selects a wallet's preferred rail (A2). Every future settlement for that
@@ -19,9 +29,16 @@ export async function GET(req: NextRequest) {
   const authz = authorize(claims, "owner");
   if (!authz.ok) return error(authz.reason!, 401);
 
+  const active = getRail().id;
   return json({
-    active: getRail().id,
-    rails: listRails().map(({ id, name, description }) => ({ id, name, description })),
+    active,
+    activeStatus: railStatus(active),
+    rails: listRails().map(({ id, name, description }) => ({
+      id,
+      name,
+      description,
+      ...railStatus(id),
+    })),
   });
 }
 

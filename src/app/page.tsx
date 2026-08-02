@@ -40,6 +40,9 @@ export default function CommandCenter() {
     };
   }, [transactions, wallets, now]);
 
+  const [busy, setBusy] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
   async function toggleFreeze(id: string, frozen: boolean) {
     await ownerApi(`/api/wallet/${id}/${frozen ? "unfreeze" : "freeze"}`, {
       method: "POST",
@@ -48,8 +51,14 @@ export default function CommandCenter() {
   }
 
   async function resetDemo() {
-    await ownerApi("/api/admin/reset", { method: "POST" });
-    router.refresh();
+    setBusy(true);
+    try {
+      await ownerApi("/api/admin/reset", { method: "POST" });
+      setConfirmReset(false);
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -66,7 +75,12 @@ export default function CommandCenter() {
         </div>
         <div className="flex items-center gap-2">
           <LedgerBadge />
-          <Button variant="outline" size="sm" onClick={resetDemo} title="Reset demo data">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmReset(true)}
+            title="Wipe all demo data and re-seed"
+          >
             <RotateCcw className="h-3.5 w-3.5" /> Reset demo
           </Button>
           <span
@@ -190,6 +204,40 @@ export default function CommandCenter() {
           </div>
         </div>
       </div>
+
+      {confirmReset ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !busy && setConfirmReset(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-danger/40 bg-panel p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="font-mono text-sm font-bold text-danger">
+              Wipe the demo workspace?
+            </div>
+            <p className="mt-2 font-mono text-xs leading-relaxed text-muted">
+              This permanently deletes every wallet, key, transaction, outbox
+              event and audit entry in the demo, then re-seeds the sample org
+              from scratch. There is no undo — the old history is gone.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => setConfirmReset(false)}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" disabled={busy} onClick={() => void resetDemo()}>
+                {busy ? "Wiping…" : "Wipe everything"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

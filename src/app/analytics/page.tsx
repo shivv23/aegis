@@ -108,7 +108,7 @@ export default function AnalyticsPage() {
         <>
           <section>
             <h2 className="mb-3 flex items-center gap-2 font-mono text-sm font-semibold text-zinc-200">
-              <TrendingUp size={15} className="text-emerald-400" /> Settled vs blocked — last 7 days
+              <TrendingUp size={15} className="text-emerald-400" /> Settled vs blocked — last 7 days (by requested day)
             </h2>
             <Card className="p-4">
               <Bars

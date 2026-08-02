@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, StatCard } from "@/components/ui";
 import { ownerApi } from "@/lib/api-client";
 import { timeAgo } from "@/lib/utils";
-import { AlertTriangle, Bell, Check, Info, Settings2, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Bell, Check, Inbox, Info, Settings2, ShieldAlert } from "lucide-react";
 import type { NotificationPrefs, NotifyChannel } from "@/core/notify";
 
 type Severity = "info" | "warning" | "critical";
@@ -19,6 +19,40 @@ interface AlertItem {
   link: string;
 }
 
+interface OutboxEntry {
+  id: string;
+  walletId: string;
+  eventType: string;
+  payload: string;
+  createdAt: number;
+  deliveredAt?: number;
+  attemptCount: number;
+}
+
+function payloadOf(entry: OutboxEntry): Record<string, string> {
+  try {
+    return JSON.parse(entry.payload) as Record<string, string>;
+  } catch {
+    return { raw: entry.payload };
+  }
+}
+
+function shortAddr(a: string): string {
+  return a.length > 22 ? `${a.slice(0, 10)}…${a.slice(-8)}` : a;
+}
+
+const OUTBOX_LABELS: Record<string, string> = {
+  STEP_UP_REQUIRED: "Owner approval required (deep-link sent)",
+  STEP_UP_APPROVED: "Transfer approved from link",
+  STEP_UP_DECLINED: "Transfer declined from link",
+  TX_BLOCKED: "Transfer blocked by guard",
+  TX_SETTLED: "Transfer settled",
+  WALLET_FROZEN: "Kill switch engaged",
+  WALLET_UNFROZEN: "Kill switch released",
+  ANOMALY: "Guard anomaly",
+  BREAKER_TRIPPED: "Circuit breaker tripped",
+};
+
 const SEVERITY_ORDER: Severity[] = ["critical", "warning", "info"];
 
 const severityMeta: Record<
@@ -32,6 +66,7 @@ const severityMeta: Record<
 
 export default function AlertsPage() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [outbox, setOutbox] = useState<OutboxEntry[]>([]);
   const [channels, setChannels] = useState<NotifyChannel[]>([]);
   const [eventTypes, setEventTypes] = useState<string[]>([]);
   const [draft, setDraft] = useState<NotificationPrefs | null>(null);
@@ -44,17 +79,19 @@ export default function AlertsPage() {
     let active = true;
     (async () => {
       try {
-        const [alertsData, prefsData] = await Promise.all([
+        const [alertsData, prefsData, outboxData] = await Promise.all([
           ownerApi<{ alerts: AlertItem[] }>("/api/alerts"),
           ownerApi<{ prefs: NotificationPrefs; channels: NotifyChannel[]; eventTypes: string[] }>(
             "/api/alerts/prefs",
           ),
+          ownerApi<{ alerts: OutboxEntry[] }>("/api/outbox?limit=50"),
         ]);
         if (!active) return;
         setAlerts(alertsData.alerts);
         setChannels(prefsData.channels);
         setEventTypes(prefsData.eventTypes);
         setDraft(prefsData.prefs);
+        setOutbox(outboxData.alerts ?? []);
         setError(null);
       } catch (e) {
         if (active) setError((e as Error).message);
@@ -197,6 +234,73 @@ export default function AlertsPage() {
           );
         })
       )}
+
+      <section className="space-y-2">
+        <h2 className="flex items-center gap-2 font-mono text-sm font-semibold text-zinc-200">
+          <Inbox className="h-4 w-4 text-info" /> Ops outbox · delivery log
+          <span className="text-[10px] font-normal text-muted">
+            what the guard pushed, and the deep-links it carries
+          </span>
+        </h2>
+        <Card className="overflow-hidden p-0">
+          {outbox.length === 0 ? (
+            <div className="px-4 py-8 text-center font-mono text-xs text-muted">
+              no outbound events yet — fire a transfer that needs approval and its
+              link lands here
+            </div>
+          ) : (
+            <div className="divide-y divide-border/60">
+              {outbox.map((e) => {
+                const p = payloadOf(e);
+                const approve = p.approveLink;
+                const decline = p.declineLink;
+                return (
+                  <div key={e.id} className="flex items-start gap-3 px-4 py-3">
+                    <Bell className="mt-0.5 h-4 w-4 shrink-0 text-info" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="truncate font-mono text-xs font-semibold text-foreground">
+                          {OUTBOX_LABELS[e.eventType] ?? e.eventType}
+                        </span>
+                        <span className="shrink-0 font-mono text-[10px] text-muted">
+                          {timeAgo(e.createdAt)} · wallet {shortAddr(e.walletId)} · {e.attemptCount} delivery{e.attemptCount === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 truncate font-mono text-[11px] text-muted">
+                        {p.amount ? `${p.amount} → ${shortAddr(p.to ?? "")}` : ""}
+                        {p.score ? ` · risk ${p.score}` : ""}
+                        {e.deliveredAt ? " · delivered" : " · pending delivery"}
+                      </p>
+                      {approve || decline ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {approve ? (
+                            <a href={approve} target="_blank" rel="noreferrer">
+                              <Button variant="primary" size="sm">
+                                <Check className="h-3 w-3" /> Approve
+                              </Button>
+                            </a>
+                          ) : null}
+                          {decline ? (
+                            <a href={decline} target="_blank" rel="noreferrer">
+                              <Button variant="danger" size="sm">Decline</Button>
+                            </a>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+        <p className="text-[11px] text-muted">
+          Deep-links are minted as short-lived <code>aegis-decision</code> tokens and
+          included in every outbound alert. Wire <code>AEGIS_SLACK_URL</code> or
+          <code>AEGIS_RESEND_API_KEY</code> to deliver them to a real channel; without
+          a gateway they stay here in the in-app outbox.
+        </p>
+      </section>
 
       <section className="space-y-2">
         <h2 className="flex items-center gap-2 font-mono text-sm font-semibold text-zinc-200">

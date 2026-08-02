@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui";
+import { clearOwnerKey, getOwnerKey } from "@/lib/api-client";
 import { clock } from "@/lib/utils";
 import { LogOut, ShieldCheck, Trash2 } from "lucide-react";
 import Link from "next/link";
@@ -50,7 +51,12 @@ export default function SessionsPage() {
   }
 
   async function signOut() {
-    await fetch("/api/auth/signout", { method: "POST" });
+    await fetch("/api/auth/signout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: getOwnerKey() }),
+    });
+    clearOwnerKey();
     refresh();
   }
 

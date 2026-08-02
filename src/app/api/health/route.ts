@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { verifyLedger } from "@/core/store";
+import { dbType } from "@/core/db";
 
 export const runtime = "nodejs";
 
@@ -18,7 +19,7 @@ export async function GET() {
       status: status === 200 ? "ok" : "degraded",
       checks: {
         ledger: proof ? { intact: proof.intact, rows: proof.rows } : { intact: false },
-        db: dbOk,
+        db: { ok: dbOk, type: dbType() },
       },
       uptime: process.uptime(),
       ts: Date.now(),

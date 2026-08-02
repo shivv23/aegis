@@ -8,7 +8,7 @@ interface Health {
   status: string;
   checks: {
     ledger: { intact: boolean; rows: number };
-    db: boolean;
+    db: { ok: boolean; type: string };
   };
   uptime: number;
   ts: number;
@@ -83,11 +83,13 @@ export default function StatusPage() {
                 <Activity className="h-5 w-5 text-violet-500" />
                 <div>
                   <div className="text-sm font-medium">Database</div>
-                  <div className="font-mono text-xs text-zinc-500">readiness probe</div>
+                  <div className="font-mono text-xs text-zinc-500">
+                    {h.checks.db.type} · readiness probe
+                  </div>
                 </div>
               </div>
-              <span className={`rounded px-2 py-0.5 font-mono text-xs ${h.checks.db ? "bg-emerald-500/15 text-emerald-500" : "bg-rose-500/15 text-rose-500"}`}>
-                {h.checks.db ? "READY" : "DOWN"}
+              <span className={`rounded px-2 py-0.5 font-mono text-xs ${h.checks.db.ok ? "bg-emerald-500/15 text-emerald-500" : "bg-rose-500/15 text-rose-500"}`}>
+                {h.checks.db.ok ? "READY" : "DOWN"}
               </span>
             </Card>
           </div>

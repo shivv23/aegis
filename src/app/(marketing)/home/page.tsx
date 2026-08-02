@@ -193,7 +193,7 @@ export default function Landing() {
           <div className="mx-auto grid max-w-6xl gap-6 px-6 py-16 md:grid-cols-3">
             {[
               ["60s", "timelock on every transfer"],
-              ["3-of-2", "multi-sig before a key is ever minted"],
+              ["2-of-3", "multi-sig before a key is ever minted"],
               ["hash-chained", "tamper-evident ledger, verifiable live"],
             ].map(([v, l]) => (
               <div key={l} className="text-center">

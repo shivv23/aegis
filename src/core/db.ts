@@ -78,3 +78,8 @@ class PgDb implements Db {
 export function createDb(url: string): Db {
   return isPostgresUrl(url) ? new PgDb(url) : new LibSqlDb(url);
 }
+
+export function dbType(): "libsql" | "postgres" {
+  const url = process.env.AEGIS_DB_URL ?? "file:./data/aegis.db";
+  return isPostgresUrl(url) ? "postgres" : "libsql";
+}

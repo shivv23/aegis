@@ -5,12 +5,16 @@ import {
   parseSessionCookie,
   signMagicToken,
   verifyMagicToken,
+  verifyMagicTokenClaims,
 } from "@/core/auth";
 import {
+  consumeMagicToken,
   createSession,
   getSession,
   getStore,
+  isApiKeyRevoked,
   listSessions,
+  revokeApiKeyByHash,
   revokeSession,
 } from "@/core/store";
 
@@ -71,3 +75,23 @@ describe("session store (1.1)", () => {
     expect((await getSession(created.id))?.revokedAt).toBeTypeOf("number");
   });
 });
+
+describe("auth hardening (P2-2)", () => {
+  it("magic links are single-use: the second consumption is rejected", async () => {
+    const claims = await verifyMagicTokenClaims(await signMagicToken("solo@acme.dev"));
+    expect(claims).not.toBeNull();
+    expect(await consumeMagicToken(claims!.jti, claims!.email)).toBe(true);
+    expect(await consumeMagicToken(claims!.jti, claims!.email)).toBe(false);
+    // The raw token is still valid but a fresh jti consumes independently.
+    const second = await verifyMagicTokenClaims(await signMagicToken("solo@acme.dev"));
+    expect(await consumeMagicToken(second!.jti, second!.email)).toBe(true);
+  });
+
+  it("revoking an API key by hash makes it report revoked", async () => {
+    const hash = "deadbeefdeadbeefdeadbeefdeadbeef";
+    expect(await isApiKeyRevoked(hash)).toBe(false);
+    await revokeApiKeyByHash(hash, "owner");
+    expect(await isApiKeyRevoked(hash)).toBe(true);
+  });
+});
+

@@ -633,6 +633,29 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Auth hardening (P2-2): a denylist for revoked API keys so sign-out can
+    // actually kill a leaked owner key, and a one-time-use ledger for magic
+    // link tokens so a captured link cannot be replayed.
+    version: 14,
+    name: "auth-hardening",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS revoked_keys (
+          key_hash TEXT PRIMARY KEY,
+          scope TEXT,
+          revoked_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS magic_tokens (
+          jti TEXT PRIMARY KEY,
+          email TEXT NOT NULL,
+          used_at BIGINT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -1491,6 +1514,7 @@ async function runPage<T>(
     orderCol: string;
     idCol?: string;
     walletId?: string;
+    search?: string;
     limit: number;
     cursor: Cursor | null;
     map: (row: Record<string, unknown>) => T;
@@ -1504,6 +1528,11 @@ async function runPage<T>(
   if (opts.walletId) {
     where += " AND wallet_id = ?";
     params.push(opts.walletId);
+  }
+  if (opts.search) {
+    const q = `%${opts.search}%`;
+    where += " AND (action LIKE ? OR details LIKE ? OR wallet_id LIKE ?)";
+    params.push(q, q, q);
   }
   if (opts.cursor) {
     where += ` AND (${opts.orderCol} < ? OR (${opts.orderCol} = ? AND ${idCol} < ?))`;
@@ -1531,6 +1560,7 @@ export async function listTransactionsPage(opts: {
 
 export async function listAuditPage(opts: {
   walletId?: string;
+  search?: string;
   limit: number;
   cursor: Cursor | null;
 }): Promise<Page<AuditLogEntry>> {
@@ -2915,6 +2945,40 @@ export async function revokeSession(id: string): Promise<boolean> {
   return true;
 }
 
+export async function revokeApiKeyByHash(keyHash: string, scope?: string): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "INSERT OR IGNORE INTO revoked_keys (key_hash, scope, revoked_at) VALUES (?, ?, ?)",
+    [keyHash, scope ?? null, Date.now()],
+  );
+}
+
+export async function isApiKeyRevoked(keyHash: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT 1 FROM revoked_keys WHERE key_hash = ?",
+    [keyHash],
+  );
+  return rows.length > 0;
+}
+
+export async function consumeMagicToken(jti: string, email: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  try {
+    await s.client.execute(
+      "INSERT INTO magic_tokens (jti, email, used_at) VALUES (?, ?, ?)",
+      [jti, email, Date.now()],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 function rowToSession(r: Record<string, unknown>): AuthSession {
   return {
     id: r.id as string,
@@ -3304,11 +3368,19 @@ export interface AgentReputation {
   lastActiveAt?: number;
 }
 
+/** Operator reputation resets: walletId → timestamp. History before the reset is ignored when scoring (P1-2 deadlock fix). */
+const reputationResets = new Map<string, number>();
+
+export function resetWalletReputation(walletId: string): void {
+  reputationResets.set(walletId, Date.now());
+}
+
 export async function agentReputation(walletId: string): Promise<AgentReputation> {
   const s = getStore();
   await s.ready;
+  const resetAt = reputationResets.get(walletId) ?? 0;
   const { rows } = await s.client.execute(
-    "SELECT status, amount, rejection_reason FROM transactions WHERE wallet_id = ?",
+    "SELECT status, amount, rejection_reason, requested_at, blocked_at FROM transactions WHERE wallet_id = ?",
     [walletId],
   );
   let settled = 0;
@@ -3317,6 +3389,11 @@ export async function agentReputation(walletId: string): Promise<AgentReputation
   let totalSpent = 0;
   let lastActiveAt: number | undefined;
   for (const r of rows) {
+    // An operator reputation reset ignores all pre-reset history, so a stuck
+    // wallet can re-earn trust instead of being permanently deadlocked.
+    // `<=` (not `<`) so rows stamped in the same ms as the reset are excluded.
+    const occurredAt = Number(r.blocked_at ?? r.requested_at ?? 0);
+    if (occurredAt > 0 && occurredAt <= resetAt) continue;
     const status = r.status as string;
     const amount = Number(r.amount);
     if (status === "SETTLED") {
@@ -3328,7 +3405,12 @@ export async function agentReputation(walletId: string): Promise<AgentReputation
       // fault — they must not drag the score down, or a legitimately frozen
       // agent stays reputation-blocked after the freeze is lifted.
       const reason = r.rejection_reason as string | undefined;
-      if (reason !== "WALLET_FROZEN" && reason !== "ORGANIZATION_FROZEN") blocked += 1;
+      if (reason === "WALLET_FROZEN" || reason === "ORGANIZATION_FROZEN") continue;
+      // A reputation block must never deepen the penalty that caused it.
+      // Otherwise a blocked agent can never raise its own score and is
+      // deadlocked forever (finding P1-2).
+      if (reason === "REPUTATION_BLOCKED") continue;
+      blocked += 1;
     } else if (status === "REVOKED") {
       revoked += 1;
     }

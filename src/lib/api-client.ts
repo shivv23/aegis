@@ -55,6 +55,14 @@ export async function ensureOwnerKey(): Promise<string> {
   return b.ownerKey;
 }
 
+export function getOwnerKey(): string | null {
+  return localStorage.getItem(OWNER_KEY);
+}
+
+export function clearOwnerKey(): void {
+  localStorage.removeItem(OWNER_KEY);
+}
+
 export async function ownerApi<T = unknown>(
   path: string,
   init: RequestInit = {},

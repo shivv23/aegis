@@ -75,7 +75,7 @@ export default function WalletRegistry() {
           <div className="mb-4 font-mono text-xs uppercase tracking-widest text-muted">
             Provision wallet
           </div>
-          <form onSubmit={handleCreate} className="space-y-3">
+          <form onSubmit={handleCreate} id="provision-form" className="space-y-3">
             <Field label="Agent name" value={name} onChange={(e) => setName(e.target.value)} required />
             <Field label="Owner DID" value={ownerDid} onChange={(e) => setOwnerDid(e.target.value)} required />
             <Field
@@ -145,31 +145,51 @@ export default function WalletRegistry() {
           <div className="font-mono text-xs uppercase tracking-widest text-muted">
             {wallets.length} provisioned
           </div>
-          {wallets.map((w) => (
-            <Card key={w.id} className="flex items-center justify-between gap-4">
-              <button
-                className="text-left"
-                onClick={() => router.push(`/wallet/${w.id}`)}
-              >
-                <div className="font-mono text-sm font-semibold hover:text-accent">
-                  {w.name}
-                </div>
-                <div className="font-mono text-[11px] text-muted">
-                  {shortId(w.id)} · {w.ownerDid}
-                </div>
-              </button>
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <div className="font-mono text-sm font-bold">{money(w.balance)}</div>
-                  <div className="text-[10px] font-mono uppercase text-muted">balance</div>
-                </div>
-                <WalletBadge status={w.status} />
-                <Button variant="outline" size="sm" onClick={() => router.push(`/wallet/${w.id}`)}>
-                  Manage
-                </Button>
+          {wallets.length === 0 ? (
+            <div className="space-y-3 rounded-xl border border-dashed border-border bg-panel/40 px-6 py-10 text-center">
+              <div className="font-mono text-sm font-semibold text-foreground">
+                No wallets yet — bring an agent on-chain
               </div>
-            </Card>
-          ))}
+              <p className="mx-auto max-w-md font-mono text-xs leading-relaxed text-muted">
+                Fill in the <span className="text-accent">Provision wallet</span> form
+                on the left to mint a policy-locked wallet and its keys. Each wallet
+                carries a spending policy an agent can never exceed, and a live
+                guardian signature that seals that policy on-chain.
+              </p>
+              <button
+                onClick={() => document.getElementById("provision-form")?.scrollIntoView({ behavior: "smooth", block: "center" })}
+                className="rounded-lg border border-accent/40 px-3 py-2 font-mono text-xs font-semibold text-accent hover:bg-accent/10"
+              >
+                Provision your first wallet →
+              </button>
+            </div>
+          ) : (
+            wallets.map((w) => (
+              <Card key={w.id} className="flex items-center justify-between gap-4">
+                <button
+                  className="text-left"
+                  onClick={() => router.push(`/wallet/${w.id}`)}
+                >
+                  <div className="font-mono text-sm font-semibold hover:text-accent">
+                    {w.name}
+                  </div>
+                  <div className="font-mono text-[11px] text-muted">
+                    {shortId(w.id)} · {w.ownerDid}
+                  </div>
+                </button>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <div className="font-mono text-sm font-bold">{money(w.balance)}</div>
+                    <div className="text-[10px] font-mono uppercase text-muted">balance</div>
+                  </div>
+                  <WalletBadge status={w.status} />
+                  <Button variant="outline" size="sm" onClick={() => router.push(`/wallet/${w.id}`)}>
+                    Manage
+                  </Button>
+                </div>
+              </Card>
+            ))
+          )}
         </div>
       </div>
     </div>

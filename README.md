@@ -59,12 +59,12 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Cryptographic agent identity** | Rail | agents sign transfers with an **Ed25519 keypair** (`x-aegis-*` headers); a stolen token is useless without the private key |
 | **Tamper-evident ledger** | Ledger | every row is **hash-chained** (`prev_hash`+`hash`+global `seq`); `GET /api/ledger/verify` proves integrity |
 | **Policy versioning + timelock** | Wallet | limit changes are recorded as versions and take effect after `AEGIS_POLICY_TIMELOCK_MS` |
-| **Ops alert outbox** | Wallet | every guard decision and wallet event is queued for delivery (SSE + future webhooks) |
+| **Ops alert outbox** | Wallet | every guard decision and wallet event is queued for delivery — HMAC-signed webhooks + a live in-app outbox carrying one-tap approve/decline deep links; Slack/email transports slot in when their env keys are set |
 | **Risk engine** | Rail | pre-tx score 0–100 (amount vs cap/budget, new payee, velocity burst, red-flag purpose, hour) |
 | **Step-up approval** | Wallet | risk score ≥ 55 → `STEP_UP_REQUIRED`; owner approves/declines before it may settle |
 | **Auto-freeze circuit breaker** | Wallet | N guard anomalies in a window → wallet freezes itself (`AEGIS_BREAKER_*`) |
 | **Pluggable settlement rails** | Rail | settlement routes through a rail plugin (`sandbox` / `usdc-testnet` / `ach-lite`) — the guard never changes |
-| **2-of-3 multi-sig owners** | Keys | owner control-plane keys are only minted after 2 distinct signers approve |
+| **2-of-3 multi-sig owners** | Keys | owner control-plane keys are minted only after 2 distinct signers approve; signers must be registered first (demo seeds 2, a third can be added from the console) |
 | **Multi-tenant orgs** | Keys | orgs with per-org wallets, org-scoped owner keys and auth on wallet routes |
 | **Spending windows + geo** | Guard | policy can restrict transfers to UTC hours (`spendingWindows`) and to approved regions (`regionAllowlist`); a `x-aegis-region` header carries the region claim |
 | **Counterparty registry** | Guard | counterparties carry status/flags/reputation; `BLOCKED` counterparties are rejected before any other check |
@@ -91,7 +91,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 131 tests across 17 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror, counterparties, budget groups, escrows, usage, multi-currency, export, key lifecycle, LLM classifier, and property-based fuzzing of the guard (fast-check)
+- **Vitest** — 268 tests across 38 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror, counterparties, budget groups, escrows, usage, multi-currency, export, key lifecycle, LLM classifier, and property-based fuzzing of the guard (fast-check)
 - **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green; live on Sepolia
 
 ## Getting started
@@ -154,7 +154,7 @@ const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: 
 - **Command Center** (`/`) — live SSE feed, kill switch, wallet registry
 - **Agent Simulator** (`/simulator`) — hostile-agent attack presets against the real rail
 - **Policy Sandbox** (`/sandbox`) — one-click what-if scenarios
-- **Multi-sig** (`/multisig`) — 2-of-3 signer approval console
+- **Multi-sig** (`/multisig`) — 2-of-3 signer approval console (seed demo has 2 registered signers; add a third to watch the flow)
 - **Analytics** (`/analytics`) — guard funnel, blocked-reason chart, daily spend, by-purpose
 - **API Docs** (`/docs`) — human-readable reference + `GET /api/openapi` (OpenAPI 3.0)
 - **Whitepaper** (`/whitepaper`) — threat model, defense-in-depth, attack matrix, test matrix

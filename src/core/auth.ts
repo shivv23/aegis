@@ -15,6 +15,7 @@
  *   AEGIS_PUBLIC_URL       absolute link base        (default localhost:3000)
  */
 import { SignJWT, jwtVerify } from "jose";
+import { randomUUID } from "node:crypto";
 import type { AuthSession } from "./store";
 
 export const MAGIC_ISSUER = "aegis-magic-link";
@@ -22,7 +23,7 @@ export const SESSION_COOKIE = "aegis_session";
 
 export async function signMagicToken(email: string): Promise<string> {
   const secret = authSecret();
-  return new SignJWT({ email: email.toLowerCase().trim() })
+  return new SignJWT({ email: email.toLowerCase().trim(), jti: randomUUID() })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(MAGIC_ISSUER)
     .setAudience("aegis-auth")
@@ -32,13 +33,27 @@ export async function signMagicToken(email: string): Promise<string> {
 }
 
 export async function verifyMagicToken(token: string): Promise<string | null> {
+  const claims = await verifyMagicTokenClaims(token);
+  return claims?.email ?? null;
+}
+
+/**
+ * Verifies a magic link and returns its email + unique id. The id is used to
+ * enforce one-time use (P2-2): a captured link can be consumed exactly once.
+ */
+export async function verifyMagicTokenClaims(
+  token: string,
+): Promise<{ email: string; jti: string } | null> {
   try {
     const secret = authSecret();
     const { payload } = await jwtVerify(token, secret, {
       issuer: MAGIC_ISSUER,
       audience: "aegis-auth",
     });
-    return typeof payload.email === "string" ? payload.email : null;
+    if (typeof payload.email !== "string" || typeof payload.jti !== "string") {
+      return null;
+    }
+    return { email: payload.email, jti: payload.jti };
   } catch {
     return null;
   }

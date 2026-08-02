@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card } from "@/components/ui";
+import { Button, Card } from "@/components/ui";
 import { ownerApi } from "@/lib/api-client";
-import { Check, ExternalLink, Link2, X } from "lucide-react";
+import { Check, ExternalLink, Link2, RefreshCw, X } from "lucide-react";
 
 interface GuardianMirror {
   wallet: string | null;
+  comparedWallet: { id: string | null; hash: string | null; isSealed: boolean };
   guardian: {
     address: string | null;
     registry: string | null;
@@ -22,11 +23,21 @@ interface GuardianMirror {
   policy: {
     hash: string | null;
     sealed: boolean;
+    sealedWallet: string | null;
     onChain: string | null;
     matches: boolean | null;
+    sealState: string;
     error: string | null;
-    note: string;
+    explanation: string;
   };
+}
+
+interface ResealResult {
+  ok?: boolean;
+  wallet?: string;
+  policyHash?: string;
+  command?: string;
+  error?: string;
 }
 
 function shortAddr(a: string | null): string {
@@ -37,6 +48,18 @@ function shortAddr(a: string | null): string {
 export function GuardianPanel() {
   const [mirror, setMirror] = useState<GuardianMirror | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resealing, setResealing] = useState(false);
+  const [resealMsg, setResealMsg] = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const m = await ownerApi<GuardianMirror>("/api/guardian");
+      setMirror(m);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "guardian read failed");
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -53,6 +76,28 @@ export function GuardianPanel() {
       active = false;
     };
   }, []);
+
+  async function reseal() {
+    setResealing(true);
+    setResealMsg(null);
+    try {
+      const res = await ownerApi<ResealResult>("/api/admin/reseal", { method: "POST" });
+      if (res.ok) {
+        setResealMsg(
+          res.command
+            ? `Target hash ${res.policyHash?.slice(0, 16)}… — run from contracts/: ${res.command}`
+            : "Seal state updated.",
+        );
+      } else {
+        setResealMsg(res.error ?? "Re-seal unavailable.");
+      }
+      await load();
+    } catch (e) {
+      setResealMsg(e instanceof Error ? e.message : "Re-seal request failed.");
+    } finally {
+      setResealing(false);
+    }
+  }
 
   if (error) {
     return (
@@ -73,7 +118,6 @@ export function GuardianPanel() {
   }
 
   const live = mirror.guardian.live;
-  const sealed = mirror.policy.sealed && mirror.policy.onChain;
 
   return (
     <Card>
@@ -124,13 +168,17 @@ export function GuardianPanel() {
         <div className="border-t border-border/60 pt-3 space-y-2">
           <div className="flex items-center gap-2 font-mono text-[11px]">
             <span className="text-muted">Policy seal</span>
-            {sealed ? (
+            {mirror.policy.sealState === "verified" ? (
               <span className="flex items-center gap-1 text-emerald-400">
                 <Check className="h-3.5 w-3.5" /> verified on-chain
               </span>
+            ) : mirror.policy.sealState === "mismatch" ? (
+              <span className="flex items-center gap-1 text-warn">
+                <X className="h-3.5 w-3.5" /> policy changed since seal
+              </span>
             ) : (
               <span className="flex items-center gap-1 text-muted">
-                <X className="h-3.5 w-3.5" /> not sealed
+                <X className="h-3.5 w-3.5" /> not verified
               </span>
             )}
           </div>
@@ -140,6 +188,25 @@ export function GuardianPanel() {
           <div className="font-mono text-[10px] text-muted break-all">
             chain {mirror.policy.onChain ?? "—"}
           </div>
+          {mirror.policy.sealedWallet ? (
+            <div className="font-mono text-[10px] text-emerald-400">
+              sealed wallet {mirror.policy.sealedWallet}
+            </div>
+          ) : null}
+          <p className="text-[11px] leading-relaxed text-muted">
+            {mirror.policy.explanation}
+          </p>
+          {mirror.policy.sealState === "mismatch" ? (
+            <div className="space-y-2">
+              <Button variant="warn" size="sm" onClick={reseal} disabled={resealing}>
+                <RefreshCw className={`h-3.5 w-3.5 ${resealing ? "animate-spin" : ""}`} />
+                Re-seal on-chain
+              </Button>
+              {resealMsg ? (
+                <div className="font-mono text-[10px] text-warn break-all">{resealMsg}</div>
+              ) : null}
+            </div>
+          ) : null}
           {mirror.policy.error ? (
             <div className="font-mono text-[10px] text-warn break-all">
               {mirror.policy.error}

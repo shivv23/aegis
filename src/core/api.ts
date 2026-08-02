@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createHash } from "node:crypto";
 import { verifyKey } from "./keys";
+import { isApiKeyRevoked } from "./store";
 import type { Scope, ScopedKeyClaims } from "./types";
 export function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
@@ -22,6 +23,12 @@ export async function authenticate(
   const header = req.headers.get("authorization");
   const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : null;
   const claims = token ? await verifyKey(token) : null;
+  const keyHash = token
+    ? createHash("sha256").update(token).digest("hex")
+    : undefined;
+  // A revoked key (e.g. after sign-out) is rejected even though its JWT is
+  // still cryptographically valid (P2-2).
+  const revoked = keyHash && claims ? await isApiKeyRevoked(keyHash) : false;
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
     req.headers.get("x-real-ip") ??
@@ -31,19 +38,25 @@ export async function authenticate(
   const audit = {
     method: req.method,
     path: req.nextUrl.pathname,
-    keyHash: token ? createHash("sha256").update(token).digest("hex") : undefined,
+    keyHash,
     scope: claims?.scope,
     walletId: claims?.walletId,
     ip,
     userAgent,
-    result: claims ? "OK" : header ? "INVALID" : "UNAUTHORIZED",
+    result: revoked
+      ? "REVOKED"
+      : claims
+        ? "OK"
+        : header
+          ? "INVALID"
+          : "UNAUTHORIZED",
   };
   if (process.env.AEGIS_REQUEST_AUDIT !== "0") {
     import("./store")
       .then((m) => m.recordRequestAudit(audit))
       .catch(() => {});
   }
-  return claims;
+  return revoked ? null : claims;
 }
 
 /**

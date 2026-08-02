@@ -4,6 +4,7 @@ import {
   createTransaction,
   createWallet,
   getStore,
+  resetWalletReputation,
 } from "@/core/store";
 import type { WalletPolicy } from "@/core/types";
 
@@ -59,5 +60,27 @@ describe("agent reputation (D5)", () => {
     const r = await agentReputation(wallet.id);
     expect(r.blocked).toBe(0);
     expect(r.score).toBeGreaterThanOrEqual(20);
+  });
+
+  it("never lets a reputation block deepen its own penalty (P1-2 deadlock fix)", async () => {
+    const wallet = await createWallet({ id: `wallet-rep-${++seq}`, name: "Deadlocked", ownerDid: "did:org:acme", balance: 500, policy });
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      await createTransaction({ walletId: wallet.id, from: wallet.id, to: "compute:0xCAFE0001", amount: 99, purpose: "denied", status: "BLOCKED", rejectionReason: "REPUTATION_BLOCKED", requestedAt: now + i, blockedAt: now + i, nonce: `rb-${i}` });
+    }
+    const r = await agentReputation(wallet.id);
+    expect(r.blocked).toBe(0);
+    // Floored at the neutral baseline, not sunk by the blocks themselves.
+    expect(r.score).toBe(20);
+  });
+
+  it("operator reset ignores pre-reset history so a wallet can recover", async () => {
+    const wallet = await createWallet({ id: `wallet-rep-${++seq}`, name: "ResetMe", ownerDid: "did:org:acme", balance: 500, policy });
+    const now = Date.now();
+    await createTransaction({ walletId: wallet.id, from: wallet.id, to: "compute:0xCAFE0001", amount: 9999, purpose: "bad", status: "BLOCKED", rejectionReason: "LIMIT_EXCEEDED", requestedAt: now, blockedAt: now, nonce: "pr-1" });
+    resetWalletReputation(wallet.id);
+    const after = await agentReputation(wallet.id);
+    expect(after.blocked).toBe(0);
+    expect(after.score).toBe(20);
   });
 });
