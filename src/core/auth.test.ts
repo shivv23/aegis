@@ -92,6 +92,9 @@ describe("auth hardening (P2-2)", () => {
     expect(await isApiKeyRevoked(hash)).toBe(false);
     await revokeApiKeyByHash(hash, "owner");
     expect(await isApiKeyRevoked(hash)).toBe(true);
+    // Idempotent: revoking the same hash again must not throw (ON CONFLICT).
+    await revokeApiKeyByHash(hash, "owner");
+    expect(await isApiKeyRevoked(hash)).toBe(true);
   });
 });
 

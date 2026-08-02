@@ -2949,7 +2949,7 @@ export async function revokeApiKeyByHash(keyHash: string, scope?: string): Promi
   const s = getStore();
   await s.ready;
   await s.client.execute(
-    "INSERT OR IGNORE INTO revoked_keys (key_hash, scope, revoked_at) VALUES (?, ?, ?)",
+    "INSERT INTO revoked_keys (key_hash, scope, revoked_at) VALUES (?, ?, ?) ON CONFLICT (key_hash) DO NOTHING",
     [keyHash, scope ?? null, Date.now()],
   );
 }
