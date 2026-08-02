@@ -65,17 +65,16 @@ const spec = {
           "POST rows of {to, amount, purpose} or an array; every row passes validate() before any settle. One rejected row blocks the batch and records STRUCTURING/aggregate checks.",
       },
     },
-    "/api/recurring": {
+    "/api/rail/recurring": {
       get: { summary: "List recurring schedules." },
       post: { summary: "Create a recurring schedule (interval, day, wallet). Runs on cron; policy is re-checked at execution time." },
     },
-    "/api/cron/jobs": { post: { summary: "Cron hook: runs due recurring payments." } },
-    "/api/fund": {
-      get: { summary: "List simulated funding deposits." },
+    "/api/rail/recurring/run": { post: { summary: "Cron hook: runs only the due recurring payments." } },
+    "/api/cron/jobs": { get: { summary: "Scheduled background jobs: settle due, step-up expiry + escalation, breaker reset, recurring run, ledger verify, SAR digest." } },
+    "/api/rail/fund": {
       post: { summary: "Simulated deposit — credits the ledger with a bank-style ref (simulated:true). No real money moves." },
     },
-    "/api/withdraw": {
-      get: { summary: "List simulated withdrawals." },
+    "/api/rail/withdraw": {
       post: { summary: "Simulated withdrawal — debits the ledger with a bank-style ref (simulated:true)." },
     },
     "/api/wallet": {

@@ -185,11 +185,11 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `POST` | `/api/rail/transfer` | agent | Request a transfer. Guard decides. |
 | `GET` | `/api/rail/health` | agent/owner | Verify scoped identity |
 | `POST` | `/api/rail/batch` | agent | Batch transfers (rows or array) through the same guard |
-| `GET` | `/api/recurring` | owner | List recurring schedules |
-| `POST` | `/api/recurring` | owner | Create a recurring schedule (runs on cron, re-checked at execution) |
-| `POST` | `/api/cron/jobs` | system | Cron hook: runs due recurring payments |
-| `GET/POST` | `/api/fund` | owner | Simulated deposit: credits the ledger with a bank-style ref (`simulated:true`) |
-| `GET/POST` | `/api/withdraw` | owner | Simulated withdrawal: debits the ledger with a bank-style ref |
+| `GET/POST` | `/api/rail/recurring` | owner | List / create recurring schedules (runs on cron, re-checked at execution) |
+| `GET` | `/api/cron/jobs` | system | Scheduled jobs: settle due txs, step-up expiry + escalation, breaker reset, recurring run, ledger verify, SAR digest |
+| `POST` | `/api/rail/recurring/run` | system | Cron hook: runs only the due recurring payments |
+| `POST` | `/api/rail/fund` | owner | Simulated deposit: credits the ledger with a bank-style ref (`simulated:true`) |
+| `POST` | `/api/rail/withdraw` | owner | Simulated withdrawal: debits the ledger with a bank-style ref |
 
 ### Owner control plane
 | Method | Path | Purpose |
