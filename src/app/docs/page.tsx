@@ -120,6 +120,11 @@ export default function DocsPage() {
           Every endpoint requires <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-emerald-300">Authorization: Bearer &lt;key&gt;</code>.
           Agents authenticate transfers with an Ed25519 signature instead — see{" "}
           <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-emerald-300">POST /api/rail/transfer</code>.
+          The risk engine also runs a live LLM intent classifier
+          (<code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-emerald-300">AEGIS_LLM_URL</code>) that
+          cross-checks each transfer purpose; a mismatch is logged as
+          <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-emerald-300">INTENT_ANOMALY</code> and bumps risk +15 —
+          try a purpose like <em>"vector bucket payout to contractor"</em>.
         </p>
       </div>
 
