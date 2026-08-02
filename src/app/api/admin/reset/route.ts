@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   const authz = authorize(claims, "owner");
   if (!authz.ok) return error(authz.reason!, 401);
 
-  const wallets = await resetStore();
+  const wallets = await resetStore({ reseed: true });
   getEvents().emit("reset", wallets);
   return json({ ok: true, wallets });
 }

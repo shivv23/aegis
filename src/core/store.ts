@@ -925,6 +925,23 @@ export async function resetStore(options: { reseed?: boolean } = {}): Promise<Wa
   await s.client.execute("DELETE FROM secrets");
   await s.client.execute("DELETE FROM orgs");
   await s.client.execute("DELETE FROM sessions");
+  await s.client.execute("DELETE FROM recurring_schedules");
+  await s.client.execute("DELETE FROM webauthn_credentials");
+  await s.client.execute("DELETE FROM webauthn_challenges");
+  await s.client.execute("DELETE FROM saved_searches");
+  await s.client.execute("DELETE FROM webhooks");
+  await s.client.execute("DELETE FROM webhook_deliveries");
+  await s.client.execute("DELETE FROM request_audit");
+  await s.client.execute("DELETE FROM kill_switches");
+  await s.client.execute("DELETE FROM revoked_keys");
+  await s.client.execute("DELETE FROM report_log");
+  await s.client.execute("DELETE FROM reconciliation_reports");
+  await s.client.execute("DELETE FROM invoices");
+  await s.client.execute("DELETE FROM invoice_lines");
+  await s.client.execute("DELETE FROM insurance_pools");
+  await s.client.execute("DELETE FROM user_settings");
+  await s.client.execute("DELETE FROM did_registry");
+  await s.client.execute("DELETE FROM magic_tokens");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
