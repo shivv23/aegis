@@ -52,8 +52,7 @@ export default function SimulatorPage() {
     if (!agentKey) return;
     const res = (await agentTransfer(agentKey, a)) as {
       ok: boolean;
-      status: number;
-      status2?: string;
+      status: string;
       reason?: string;
       details?: string;
       error?: string;
@@ -61,7 +60,7 @@ export default function SimulatorPage() {
       transaction?: { id: string; status: string };
     };
     setResponse({ ok: res.ok, data: res });
-    const verdict = res.status2 ?? "REJECTED";
+    const verdict = res.status ?? "REJECTED";
     pushLog(`${money(a.amount)} → ${a.to} : ${verdict}${res.reason ? ` (${res.reason})` : ""}`);
   }
 

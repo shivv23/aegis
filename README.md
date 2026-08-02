@@ -372,7 +372,7 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_WEBHOOK_SECRET` | unset | HMAC secret for `X-AEGIS-Signature` on webhook payloads |
 | `AEGIS_LLM_URL` | unset | optional LLM endpoint for intent classification of `purpose` (OpenAI chat/completions dialect — works with OpenAI, Orca Router, OpenRouter) |
 | `AEGIS_LLM_KEY` | unset | bearer key sent to `AEGIS_LLM_URL`; without it the request goes out unauthenticated |
-| `AEGIS_LLM_MODEL` | `orcarouter/auto` | model id sent to the LLM endpoint |
+| `AEGIS_LLM_MODEL` | `tencent/hy3` | model id sent to the LLM endpoint |
 | `AEGIS_ESCALATION_GRACE_MS` | `30000` | step-up window after which undecided transfers get an escalation nudge event |
 | `AEGIS_EXPORT_SIGNING_KEY` | generated | Ed25519 seed used to sign `audit.json` export packs; set a fixed value so prod signatures stay verifiable |
 

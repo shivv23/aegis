@@ -77,7 +77,7 @@ describe("classifyWithLLM", () => {
     };
     expect(sent.headers["authorization"] ?? sent.headers["Authorization"]).toBe("Bearer sk-test-secret");
     const body = JSON.parse(sent.body) as { model: string; messages: unknown[] };
-    expect(body.model).toBe("orcarouter/auto");
+    expect(body.model).toBe("tencent/hy3");
     expect(Array.isArray(body.messages)).toBe(true);
   });
 

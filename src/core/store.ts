@@ -104,12 +104,35 @@ function getStore(): StoreShape {
 
 /**
  * Nonce replay protection. Returns true only the first time a nonce is seen.
+ *
+ * Nonces are persisted in the `nonces` table (PK = nonce) so replay
+ * protection holds across the multiple serverless instances the app scales
+ * to — the in-memory set alone is per-instance and cannot stop a replayed
+ * request that lands on a different warm instance. The set is kept as a fast
+ * path; the database insert is the source of truth.
  */
+const NONCE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+let nonceCleanupCounter = 0;
+
 export async function consumeNonce(nonce: string): Promise<boolean> {
   const s = getStore();
   await s.ready;
   if (s.nonces.has(nonce)) return false;
+  const now = Date.now();
+  try {
+    await s.client.execute(
+      "INSERT INTO nonces (nonce, created_at) VALUES (?, ?)",
+      [nonce, now],
+    );
+  } catch {
+    return false;
+  }
   s.nonces.add(nonce);
+  if (++nonceCleanupCounter % 128 === 0) {
+    await s.client
+      .execute("DELETE FROM nonces WHERE created_at < ?", [now - NONCE_TTL_MS])
+      .catch(() => {});
+  }
   return true;
 }
 
@@ -733,28 +756,68 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Persisted nonce store (cross-instance replay protection) and a unique
+    // constraint on idempotency keys so two concurrent requests carrying the
+    // same key can never double-settle. NULL keys (plain transfers) are not
+    // constrained, so the index stays sparse.
+    version: 16,
+    name: "nonce-store-and-idempotency-unique",
+    up: async (client) => {
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS nonces (
+          nonce TEXT PRIMARY KEY,
+          created_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_idempotency ON transactions(idempotency_key)",
+      );
+    },
+  },
+  {
+    // Same unique-idempotency guard for escrows: two concurrent requests with
+    // the same key must not double-debit the wallet.
+    version: 17,
+    name: "escrow-idempotency-unique",
+    up: async (client) => {
+      await client.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_escrows_idempotency ON escrows(idempotency_key)",
+      );
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
-  await client.execute(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      applied_at BIGINT NOT NULL
-    )
-  `);
-  const { rows } = await client.execute(
-    "SELECT version FROM schema_migrations ORDER BY version",
-  );
-  const applied = new Set(rows.map((r) => Number(r.version)));
-  for (const migration of MIGRATIONS) {
-    if (applied.has(migration.version)) continue;
-    await migration.up(client);
-    await client.execute(
-      "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-      [migration.version, migration.name, Date.now()],
+  // Cold boots race: concurrent serverless instances could each read the same
+  // set of un-applied migrations and double-ALTER. Serialize the whole
+  // check-and-apply in one transaction; Postgres additionally takes an
+  // advisory transaction lock so simultaneous booters wait their turn.
+  // SQLite serializes write transactions natively, so it needs no lock.
+  await client.withTransaction(async (tx) => {
+    if (tx.dialect === "postgres") {
+      await tx.execute("SELECT pg_advisory_xact_lock(182882)");
+    }
+    await tx.execute(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at BIGINT NOT NULL
+      )
+    `);
+    const { rows } = await tx.execute(
+      "SELECT version FROM schema_migrations ORDER BY version",
     );
-  }
+    const applied = new Set(rows.map((r) => Number(r.version)));
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.version)) continue;
+      await migration.up(tx);
+      await tx.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        [migration.version, migration.name, Date.now()],
+      );
+    }
+  });
 }
 
 /**
@@ -770,137 +833,147 @@ async function runSeed(client: Db): Promise<void> {
     maxPerTx: 100,
     dailyLimit: 1000,
     monthlyLimit: 5000,
-    velocityLimitPerMin: 30,
+    velocityLimitPerMin: 8,
     allowlist: [...SEED_VENDORS],
   };
 
-  await client.execute(
-    `INSERT INTO orgs (id, name, created_at)
-     VALUES (?, ?, ?)`,
-    [SEED_ORG_ID, "Acme Labs", now - 30 * dayMs],
-  );
+  // The whole seed is one transaction and the org/wallet inserts are
+  // idempotent (ON CONFLICT DO NOTHING). Multiple serverless instances cold-
+  // booting at once can each pass the "no wallets yet" guard; whichever wins
+  // the wallet insert performs the full seed and the losers skip, so a
+  // primary-key collision can never break an instance.
+  await client.withTransaction(async (tx) => {
+    await tx.execute(
+      `INSERT INTO orgs (id, name, created_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT (id) DO NOTHING`,
+      [SEED_ORG_ID, "Acme Labs", now - 30 * dayMs],
+    );
 
-  await client.execute(
-    `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at, org_id)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      SEED_WALLET_ID,
-      "TradingBot-42",
-      "did:org:acme",
-      9975,
-      policy.maxPerTx,
-      policy.dailyLimit,
-      policy.monthlyLimit,
-      policy.velocityLimitPerMin,
-      JSON.stringify(policy.allowlist),
-      now - 30 * dayMs,
-      SEED_ORG_ID,
-    ],
-  );
+    const walletInsert = await tx.execute(
+      `INSERT INTO wallets (id, name, owner_did, status, balance, max_per_tx, daily_limit, monthly_limit, velocity_limit_per_min, allowlist, created_at, org_id)
+       VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO NOTHING RETURNING id`,
+      [
+        SEED_WALLET_ID,
+        "TradingBot-42",
+        "did:org:acme",
+        9975,
+        policy.maxPerTx,
+        policy.dailyLimit,
+        policy.monthlyLimit,
+        policy.velocityLimitPerMin,
+        JSON.stringify(policy.allowlist),
+        now - 30 * dayMs,
+        SEED_ORG_ID,
+      ],
+    );
+    if (walletInsert.rows.length === 0) return;
 
-  const history: Array<{
-    to: string;
-    amount: number;
-    purpose: string;
-    age: number;
-  }> = [
-    { to: "compute:0xCAFE0001", amount: 40, purpose: "GPU burst #147", age: 50 },
-    { to: "api:0xBEEF0002", amount: 15, purpose: "LLM API quota", age: 30 },
-    { to: "storage:0xDEAD0003", amount: 8, purpose: "Vector DB storage", age: 15 },
-    { to: "compute:0xCAFE0001", amount: 25, purpose: "GPU burst #146", age: 10 },
-  ];
+    const history: Array<{
+      to: string;
+      amount: number;
+      purpose: string;
+      age: number;
+    }> = [
+      { to: "compute:0xCAFE0001", amount: 40, purpose: "GPU burst #147", age: 50 },
+      { to: "api:0xBEEF0002", amount: 15, purpose: "LLM API quota", age: 30 },
+      { to: "storage:0xDEAD0003", amount: 8, purpose: "Vector DB storage", age: 15 },
+      { to: "compute:0xCAFE0001", amount: 25, purpose: "GPU burst #146", age: 10 },
+    ];
 
-  for (const h of history) {
-    const settledAt = now - h.age;
-    const nonce = randomUUID();
-    const content = txContent({
-      walletId: SEED_WALLET_ID,
-      from: SEED_WALLET_ID,
-      to: h.to,
-      amountUnits: unitsFromFloat(h.amount, 2).toString(),
-      purpose: h.purpose,
-      nonce,
-      requestedAt: settledAt,
-    });
-    await appendLedgerRow(
-      client,
-      "transactions",
-      ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
+    for (const h of history) {
+      const settledAt = now - h.age;
+      const nonce = randomUUID();
+      const content = txContent({
+        walletId: SEED_WALLET_ID,
+        from: SEED_WALLET_ID,
+        to: h.to,
+        amountUnits: unitsFromFloat(h.amount, 2).toString(),
+        purpose: h.purpose,
+        nonce,
+        requestedAt: settledAt,
+      });
+      await appendLedgerRow(
+        tx,
+        "transactions",
+        ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce"],
+        [
+          randomUUID(),
+          SEED_WALLET_ID,
+          SEED_WALLET_ID,
+          h.to,
+          h.amount,
+          unitsFromFloat(h.amount, 2).toString(),
+          h.purpose,
+          "SETTLED",
+          null,
+          settledAt,
+          settledAt,
+          settledAt,
+          null,
+          null,
+          nonce,
+        ],
+        content,
+      );
+    }
+
+    await tx.execute(
+      `INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`,
       [
         randomUUID(),
         SEED_WALLET_ID,
-        SEED_WALLET_ID,
-        h.to,
-        h.amount,
-        unitsFromFloat(h.amount, 2).toString(),
-        h.purpose,
-        "SETTLED",
-        null,
-        settledAt,
-        settledAt,
-        settledAt,
-        null,
-        null,
-        nonce,
+        JSON.stringify(policy),
+        policyHash(policy),
+        "system",
+        now - 30 * dayMs,
+        now - 30 * dayMs,
       ],
-      content,
     );
-  }
 
-  await client.execute(
-    `INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')`,
-    [
-      randomUUID(),
-      SEED_WALLET_ID,
-      JSON.stringify(policy),
-      policyHash(policy),
-      "system",
-      now - 30 * dayMs,
-      now - 30 * dayMs,
-    ],
-  );
-
-  await appendLedgerRow(
-    client,
-    "audit",
-    ["id", "wallet_id", "actor", "action", "details", "timestamp"],
-    [
-      randomUUID(),
-      SEED_WALLET_ID,
-      "system",
-      "WALLET_CREATED",
-      "Wallet provisioned for TradingBot-42",
-      now - 30 * dayMs,
-    ],
-    auditContent({
-      walletId: SEED_WALLET_ID,
-      actor: "system",
-      action: "WALLET_CREATED",
-      details: "Wallet provisioned for TradingBot-42",
-      timestamp: now - 30 * dayMs,
-    }),
-  );
-  await appendLedgerRow(
-    client,
-    "audit",
-    ["id", "wallet_id", "actor", "action", "details", "timestamp"],
-    [
-      randomUUID(),
-      SEED_WALLET_ID,
-      "system",
-      "POLICY_SET",
-      "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
-      now - 30 * dayMs,
-    ],
-    auditContent({
-      walletId: SEED_WALLET_ID,
-      actor: "system",
-      action: "POLICY_SET",
-      details: "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
-      timestamp: now - 30 * dayMs,
-    }),
-  );
+    await appendLedgerRow(
+      tx,
+      "audit",
+      ["id", "wallet_id", "actor", "action", "details", "timestamp"],
+      [
+        randomUUID(),
+        SEED_WALLET_ID,
+        "system",
+        "WALLET_CREATED",
+        "Wallet provisioned for TradingBot-42",
+        now - 30 * dayMs,
+      ],
+      auditContent({
+        walletId: SEED_WALLET_ID,
+        actor: "system",
+        action: "WALLET_CREATED",
+        details: "Wallet provisioned for TradingBot-42",
+        timestamp: now - 30 * dayMs,
+      }),
+    );
+    await appendLedgerRow(
+      tx,
+      "audit",
+      ["id", "wallet_id", "actor", "action", "details", "timestamp"],
+      [
+        randomUUID(),
+        SEED_WALLET_ID,
+        "system",
+        "POLICY_SET",
+        "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
+        now - 30 * dayMs,
+      ],
+      auditContent({
+        walletId: SEED_WALLET_ID,
+        actor: "system",
+        action: "POLICY_SET",
+        details: "maxPerTx=$100 dailyLimit=$1000 monthlyLimit=$5000 velocity=30/min",
+        timestamp: now - 30 * dayMs,
+      }),
+    );
+  });
 }
 
 export async function resetStore(options: { reseed?: boolean } = {}): Promise<Wallet[]> {
@@ -942,6 +1015,7 @@ export async function resetStore(options: { reseed?: boolean } = {}): Promise<Wa
   await s.client.execute("DELETE FROM user_settings");
   await s.client.execute("DELETE FROM did_registry");
   await s.client.execute("DELETE FROM magic_tokens");
+  await s.client.execute("DELETE FROM nonces");
   await s.client.execute(
     "UPDATE ledger_state SET head_hash = ?, row_count = 0 WHERE id = 1",
     [GENESIS_HASH],
@@ -1471,11 +1545,28 @@ export async function createEscrow(input: {
     createdAt: Date.now(),
     heldUntil: input.heldUntil,
   };
-  await s.client.execute(
-    "INSERT INTO escrows (id, wallet_id, \"from\", \"to\", amount, condition, status, created_at, held_until, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, 'HELD', ?, ?, ?)",
-    [escrow.id, escrow.walletId, escrow.from, escrow.to, escrow.amount, escrow.condition, escrow.createdAt, escrow.heldUntil ?? null, input.idempotencyKey ?? null],
-  );
-  await debitWallet(escrow.walletId, escrow.amount);
+  try {
+    // Insert + debit are one transaction so a failure between them can never
+    // leave a HELD escrow that was never funded.
+    await s.client.withTransaction(async (tx) => {
+      await tx.execute(
+        "INSERT INTO escrows (id, wallet_id, \"from\", \"to\", amount, condition, status, created_at, held_until, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, 'HELD', ?, ?, ?)",
+        [escrow.id, escrow.walletId, escrow.from, escrow.to, escrow.amount, escrow.condition, escrow.createdAt, escrow.heldUntil ?? null, input.idempotencyKey ?? null],
+      );
+      await tx.execute("UPDATE wallets SET balance = balance - ? WHERE id = ?", [
+        input.amount,
+        input.walletId,
+      ]);
+    });
+  } catch (e) {
+    // The unique index on idempotency_key makes a concurrent duplicate-insert
+    // impossible; if one slips in, replay it instead of failing the request.
+    if (input.idempotencyKey) {
+      const existing = await findEscrowByIdempotencyKey(input.idempotencyKey);
+      if (existing) return existing;
+    }
+    throw e;
+  }
   await addAudit({
     walletId: escrow.walletId,
     actor: "owner",
@@ -1515,11 +1606,16 @@ export async function releaseEscrow(id: string, actor = "owner"): Promise<Escrow
   const s = getStore();
   await s.ready;
   const { rows } = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
-  const row = rows[0];
-  if (!row) return null;
-  const escrow = rowToEscrow(row as Record<string, unknown>);
-  if (escrow.status !== "HELD") return escrow;
-  await s.client.execute("UPDATE escrows SET status = 'RELEASED', released_at = ? WHERE id = ?", [Date.now(), id]);
+  if (!rows[0]) return null;
+  const escrow = rowToEscrow(rows[0] as Record<string, unknown>);
+  const upd = await s.client.execute(
+    "UPDATE escrows SET status = 'RELEASED', released_at = ? WHERE id = ? AND status = 'HELD'",
+    [Date.now(), id],
+  );
+  if ((upd.affected ?? 0) === 0) {
+    const current = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
+    return current.rows[0] ? rowToEscrow(current.rows[0] as Record<string, unknown>) : null;
+  }
   await addAudit({
     walletId: escrow.walletId,
     actor: actor as AuditLogEntry["actor"],
@@ -1533,11 +1629,18 @@ export async function refundEscrow(id: string, actor = "owner"): Promise<Escrow 
   const s = getStore();
   await s.ready;
   const { rows } = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
-  const row = rows[0];
-  if (!row) return null;
-  const escrow = rowToEscrow(row as Record<string, unknown>);
-  if (escrow.status !== "HELD") return escrow;
-  await s.client.execute("UPDATE escrows SET status = 'REFUNDED', refunded_at = ? WHERE id = ?", [Date.now(), id]);
+  if (!rows[0]) return null;
+  const escrow = rowToEscrow(rows[0] as Record<string, unknown>);
+  // Guard the status flip on HELD so two concurrent refunds can never both
+  // credit the wallet. Only the update that wins performs the credit.
+  const upd = await s.client.execute(
+    "UPDATE escrows SET status = 'REFUNDED', refunded_at = ? WHERE id = ? AND status = 'HELD'",
+    [Date.now(), id],
+  );
+  if ((upd.affected ?? 0) === 0) {
+    const current = await s.client.execute("SELECT * FROM escrows WHERE id = ?", [id]);
+    return current.rows[0] ? rowToEscrow(current.rows[0] as Record<string, unknown>) : null;
+  }
   await creditWallet(escrow.walletId, escrow.amount);
   await addAudit({
     walletId: escrow.walletId,
@@ -2197,13 +2300,23 @@ export async function settleDue(now = Date.now()): Promise<Transaction[]> {
         });
         continue;
       }
-      await debitWallet(tx.walletId, tx.amount);
-      const next = await transitionTransaction(tx.id, "SETTLED", {
-        settledAt: now,
-        externalRef: result.externalRef,
-        rail: rail.id,
+      // Settle and debit atomically: the status flip is guarded on PENDING and
+      // the balance debit only runs when that flip wins, so two concurrent
+      // settlement ticks can never debit the same transfer twice.
+      const next = await s.client.withTransaction(async (t) => {
+        const upd = await t.execute(
+          `UPDATE transactions SET status = 'SETTLED', settled_at = ?, external_ref = ?, rail = ? WHERE id = ? AND status = 'PENDING'`,
+          [now, result.externalRef ?? null, rail.id, tx.id],
+        );
+        if ((upd.affected ?? 0) === 0) return null;
+        await t.execute("UPDATE wallets SET balance = balance - ? WHERE id = ?", [
+          tx.amount,
+          tx.walletId,
+        ]);
+        return { ...tx, status: "SETTLED" as TxStatus, settledAt: now, externalRef: result.externalRef, rail: rail.id };
       });
       if (next) {
+        s.events.emit("tx", next);
         settled.push(next);
         await recordUsage({
           walletId: tx.walletId,
@@ -2320,6 +2433,7 @@ export async function approveStepUp(
   const next = await transitionTransaction(id, "PENDING", {
     pendingUntil: now + HOLD_MS,
   });
+  if (!next) return null;
   await addAudit({
     walletId: tx.walletId,
     actor: "owner",
@@ -2331,7 +2445,7 @@ export async function approveStepUp(
     amount: tx.amount,
     to: tx.to,
   });
-  return { tx: next!, wallet: await getWallet(tx.walletId) };
+  return { tx: next, wallet: await getWallet(tx.walletId) };
 }
 
 export async function declineStepUp(
@@ -2343,6 +2457,7 @@ export async function declineStepUp(
     rejectionReason: "STEP_UP_DECLINED",
     blockedAt: Date.now(),
   });
+  if (!next) return null;
   await addAudit({
     walletId: tx.walletId,
     actor: "owner",
@@ -2496,41 +2611,51 @@ export async function createTransaction(
     if (existing) return existing;
   }
   const id = randomUUID();
-  await appendLedgerRow(
-    s.client,
-    "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref", "idempotency_key", "kind"],
-    [
-      id,
-      input.walletId,
-      input.from,
-      input.to,
-      input.amount,
-      unitsFromFloat(input.amount, 2).toString(),
-      input.purpose,
-      input.status,
-      input.rejectionReason ?? null,
-      input.requestedAt,
-      input.pendingUntil ?? null,
-      input.settledAt ?? null,
-      input.blockedAt ?? null,
-      input.revokedAt ?? null,
-      input.nonce,
-      input.stepUpScore ?? null,
-      input.externalRef ?? null,
-      input.idempotencyKey ?? null,
-      input.kind ?? "transfer",
-    ],
-    txContent({
-      walletId: input.walletId,
-      from: input.from,
-      to: input.to,
-      amountUnits: unitsFromFloat(input.amount, 2).toString(),
-      purpose: input.purpose,
-      nonce: input.nonce,
-      requestedAt: input.requestedAt,
-    }),
-  );
+  try {
+    await appendLedgerRow(
+      s.client,
+      "transactions",
+      ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref", "idempotency_key", "kind"],
+      [
+        id,
+        input.walletId,
+        input.from,
+        input.to,
+        input.amount,
+        unitsFromFloat(input.amount, 2).toString(),
+        input.purpose,
+        input.status,
+        input.rejectionReason ?? null,
+        input.requestedAt,
+        input.pendingUntil ?? null,
+        input.settledAt ?? null,
+        input.blockedAt ?? null,
+        input.revokedAt ?? null,
+        input.nonce,
+        input.stepUpScore ?? null,
+        input.externalRef ?? null,
+        input.idempotencyKey ?? null,
+        input.kind ?? "transfer",
+      ],
+      txContent({
+        walletId: input.walletId,
+        from: input.from,
+        to: input.to,
+        amountUnits: unitsFromFloat(input.amount, 2).toString(),
+        purpose: input.purpose,
+        nonce: input.nonce,
+        requestedAt: input.requestedAt,
+      }),
+    );
+  } catch (e) {
+    // The unique index on idempotency_key makes a concurrent duplicate-insert
+    // impossible; if one slips in, replay it instead of failing the request.
+    if (input.idempotencyKey) {
+      const existing = await findTransactionByIdempotencyKey(input.idempotencyKey);
+      if (existing) return existing;
+    }
+    throw e;
+  }
   const tx = { ...input, id };
   s.events.emit("tx", tx);
   await recordOutbox(
@@ -2566,8 +2691,12 @@ export async function transitionTransaction(
     rail: fields.rail ?? tx.rail,
   };
 
-  await s.client.execute(
-    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ?, external_ref = ?, rail = ? WHERE id = ?`,
+  // The UPDATE is guarded on the current status (`WHERE status = from`) so a
+  // concurrent writer (another serverless instance settling the same PENDING
+  // row, a revoke racing a settle, ...) can never double-advance it. A lost
+  // race returns null — the caller sees the transaction already moved.
+  const updated = await s.client.execute(
+    `UPDATE transactions SET status = ?, rejection_reason = ?, settled_at = ?, blocked_at = ?, revoked_at = ?, pending_until = ?, external_ref = ?, rail = ? WHERE id = ? AND status = ?`,
     [
       next.status,
       next.rejectionReason ?? null,
@@ -2578,8 +2707,10 @@ export async function transitionTransaction(
       next.externalRef ?? null,
       next.rail ?? null,
       id,
+      from,
     ],
   );
+  if ((updated.affected ?? 0) === 0) return null;
   s.events.emit("tx", next);
   return next;
 }
@@ -3418,11 +3549,14 @@ export async function deployPoolCoverage(poolId: string, amount: number): Promis
   await s.ready;
   const pool = await getPool(poolId);
   if (!pool) return null;
-  if (amount <= 0 || poolRemaining(pool) < amount) return null;
-  await s.client.execute(
-    "UPDATE insurance_pools SET deployed = deployed + ? WHERE id = ?",
-    [amount, poolId],
+  if (amount <= 0) return null;
+  // Atomic capacity check: the UPDATE only succeeds while the pool still has
+  // room, so two concurrent deployments can never over-deploy.
+  const upd = await s.client.execute(
+    "UPDATE insurance_pools SET deployed = deployed + ? WHERE id = ? AND deployed + ? <= capacity",
+    [amount, poolId, amount],
   );
+  if ((upd.affected ?? 0) === 0) return null;
   return getPool(poolId);
 }
 

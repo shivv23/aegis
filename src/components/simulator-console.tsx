@@ -93,18 +93,17 @@ export function SimulatorConsole({
       })) as {
         ok: boolean;
         status: string;
-        status2?: string;
         reason?: string;
         details?: string;
         error?: string;
       };
-      const blocked = res.status2 === "BLOCKED";
+      const blocked = res.status === "BLOCKED";
       const line: ConsoleLine = {
         id: crypto.randomUUID(),
         time: Date.now(),
         label: `${scenario.label} · ${money(scenario.amount)} → ${scenario.to}`,
         ok: !blocked && res.ok,
-        status: blocked ? "BLOCKED" : (res.status2 ?? "REJECTED"),
+        status: res.status ?? "REJECTED",
         detail: res.details ?? res.error ?? res.status ?? "processed",
       };
       setLines((prev) => [line, ...prev].slice(0, 60));
@@ -124,12 +123,12 @@ export function SimulatorConsole({
           purpose: `burst ${i + 1}`,
         })) as {
           ok: boolean;
-          status2?: string;
+          status: string;
           reason?: string;
           details?: string;
           error?: string;
         };
-        const blocked = res.status2 === "BLOCKED";
+        const blocked = res.status === "BLOCKED";
         setLines((prev) =>
           [
             {
@@ -137,7 +136,7 @@ export function SimulatorConsole({
               time: Date.now(),
               label: `burst #${i + 1} · $1 → ${scenario.to}`,
               ok: !blocked && res.ok,
-              status: blocked ? "BLOCKED" : (res.status2 ?? "REJECTED"),
+              status: res.status ?? "REJECTED",
               detail: res.details ?? res.error ?? "processed",
             },
             ...prev,

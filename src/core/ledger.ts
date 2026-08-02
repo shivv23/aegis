@@ -76,7 +76,31 @@ async function headOf(client: Db): Promise<{ headHash: string; rowCount: number 
     };
   }
   await client.execute(
-    "INSERT INTO ledger_state (id, head_hash, row_count) VALUES (1, ?, 0)",
+    "INSERT INTO ledger_state (id, head_hash, row_count) VALUES (1, ?, 0) ON CONFLICT (id) DO NOTHING",
+    [GENESIS_HASH],
+  );
+  return { headHash: GENESIS_HASH, rowCount: 0 };
+}
+
+/**
+ * Head read that also locks the ledger head row so the read-modify-write in
+ * `appendLedgerRow` is atomic. Postgres uses a row lock (`FOR UPDATE`) so
+ * concurrent serverless instances serialize on the head; SQLite serializes
+ * write transactions natively, so the plain read is already safe there.
+ */
+async function headOfLocked(client: Db): Promise<{ headHash: string; rowCount: number }> {
+  const lock = client.dialect === "postgres" ? " FOR UPDATE" : "";
+  const { rows } = await client.execute(
+    `SELECT head_hash, row_count FROM ledger_state WHERE id = 1${lock}`,
+  );
+  if (rows.length > 0) {
+    return {
+      headHash: rows[0].head_hash as string,
+      rowCount: Number(rows[0].row_count),
+    };
+  }
+  await client.execute(
+    "INSERT INTO ledger_state (id, head_hash, row_count) VALUES (1, ?, 0) ON CONFLICT (id) DO NOTHING",
     [GENESIS_HASH],
   );
   return { headHash: GENESIS_HASH, rowCount: 0 };
@@ -89,22 +113,28 @@ export async function appendLedgerRow(
   values: unknown[],
   content: string,
 ): Promise<{ seq: number; hash: string; prevHash: string }> {
-  const head = await headOf(client);
-  const seq = head.rowCount + 1;
-  const hash = chainHash(head.headHash, content);
-  const cols = [...columns, "seq", "prev_hash", "hash", "canonical"];
-  const vals = [...values, seq, head.headHash, hash, content];
-  await client.execute(
-    `INSERT INTO ${table} (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${vals
-      .map(() => "?")
-      .join(", ")})`,
-    vals,
-  );
-  await client.execute(
-    "UPDATE ledger_state SET head_hash = ?, row_count = ? WHERE id = 1",
-    [hash, seq],
-  );
-  return { seq, hash, prevHash: head.headHash };
+  // The head advance (read head → insert row → update head) is a single
+  // transaction so two concurrent appends can never compute the same seq or
+  // leave the chain pointing at a lost update. `headOfLocked` serializes the
+  // read-modify-write across serverless instances.
+  return client.withTransaction(async (tx) => {
+    const head = await headOfLocked(tx);
+    const seq = head.rowCount + 1;
+    const hash = chainHash(head.headHash, content);
+    const cols = [...columns, "seq", "prev_hash", "hash", "canonical"];
+    const vals = [...values, seq, head.headHash, hash, content];
+    await tx.execute(
+      `INSERT INTO ${table} (${cols.map((c) => `"${c}"`).join(", ")}) VALUES (${vals
+        .map(() => "?")
+        .join(", ")})`,
+      vals,
+    );
+    await tx.execute(
+      "UPDATE ledger_state SET head_hash = ?, row_count = ? WHERE id = 1",
+      [hash, seq],
+    );
+    return { seq, hash, prevHash: head.headHash };
+  });
 }
 
 interface LedgerEntry {
@@ -118,79 +148,88 @@ interface LedgerEntry {
 }
 
 export async function verifyLedger(client: Db): Promise<LedgerProof> {
-  const txRows = await client.execute(
-    'SELECT id, seq, prev_hash, hash, canonical, wallet_id, "from", "to", amount, purpose, nonce, requested_at FROM transactions',
-  );
-  const auditRows = await client.execute(
-    "SELECT id, seq, prev_hash, hash, canonical, wallet_id, actor, action, details, timestamp FROM audit",
-  );
-  const entries: LedgerEntry[] = [
-    ...txRows.rows.map((r) => ({
-      seq: Number(r.seq),
-      table: "transactions",
-      id: r.id,
-      prevHash: r.prev_hash as string,
-      hash: r.hash as string,
-      canonical: r.canonical as string,
-      recomputed: txContent({
-        walletId: r.wallet_id as string,
-        from: r.from as string,
-        to: r.to as string,
-        amountUnits: unitsStringOf(r.amount),
-        purpose: r.purpose as string,
-        nonce: r.nonce as string,
-        requestedAt: Number(r.requested_at),
-      }),
-    })),
-    ...auditRows.rows.map((r) => ({
-      seq: Number(r.seq),
-      table: "audit",
-      id: r.id,
-      prevHash: r.prev_hash as string,
-      hash: r.hash as string,
-      canonical: r.canonical as string,
-      recomputed: auditContent({
-        walletId: r.wallet_id as string,
-        actor: r.actor as string,
-        action: r.action as string,
-        details: r.details as string,
-        timestamp: Number(r.timestamp),
-      }),
-    })),
-  ].sort((a, b) => a.seq - b.seq);
+  // Run the multi-statement check on one repeatable-read snapshot so a
+  // concurrent append can never make the rows and the head disagree (a false
+  // "tampered" reading). libSQL write transactions are already snapshot
+  // isolated; Postgres is pinned to REPEATABLE READ here.
+  return client.withTransaction(
+    async (tx) => {
+      const txRows = await tx.execute(
+        'SELECT id, seq, prev_hash, hash, canonical, wallet_id, "from", "to", amount, purpose, nonce, requested_at FROM transactions',
+      );
+      const auditRows = await tx.execute(
+        "SELECT id, seq, prev_hash, hash, canonical, wallet_id, actor, action, details, timestamp FROM audit",
+      );
+      const entries: LedgerEntry[] = [
+        ...txRows.rows.map((r) => ({
+          seq: Number(r.seq),
+          table: "transactions",
+          id: r.id,
+          prevHash: r.prev_hash as string,
+          hash: r.hash as string,
+          canonical: r.canonical as string,
+          recomputed: txContent({
+            walletId: r.wallet_id as string,
+            from: r.from as string,
+            to: r.to as string,
+            amountUnits: unitsStringOf(r.amount),
+            purpose: r.purpose as string,
+            nonce: r.nonce as string,
+            requestedAt: Number(r.requested_at),
+          }),
+        })),
+        ...auditRows.rows.map((r) => ({
+          seq: Number(r.seq),
+          table: "audit",
+          id: r.id,
+          prevHash: r.prev_hash as string,
+          hash: r.hash as string,
+          canonical: r.canonical as string,
+          recomputed: auditContent({
+            walletId: r.wallet_id as string,
+            actor: r.actor as string,
+            action: r.action as string,
+            details: r.details as string,
+            timestamp: Number(r.timestamp),
+          }),
+        })),
+      ].sort((a, b) => a.seq - b.seq);
 
-  let expected = GENESIS_HASH;
-  let intact = true;
-  let brokenAt: LedgerProof["brokenAt"];
+      let expected = GENESIS_HASH;
+      let intact = true;
+      let brokenAt: LedgerProof["brokenAt"];
 
-  for (const entry of entries) {
-    const contentValid = entry.canonical === entry.recomputed;
-    const hashValid = entry.hash === chainHash(entry.prevHash, entry.canonical);
-    const linkValid = entry.prevHash === expected;
-    if (!contentValid || !hashValid || !linkValid) {
-      intact = false;
-      brokenAt = {
-        seq: entry.seq,
-        table: entry.table,
-        id: String(entry.id),
+      for (const entry of entries) {
+        const contentValid = entry.canonical === entry.recomputed;
+        const hashValid = entry.hash === chainHash(entry.prevHash, entry.canonical);
+        const linkValid = entry.prevHash === expected;
+        if (!contentValid || !hashValid || !linkValid) {
+          intact = false;
+          brokenAt = {
+            seq: entry.seq,
+            table: entry.table,
+            id: String(entry.id),
+          };
+          break;
+        }
+        expected = entry.hash;
+      }
+
+      const { headHash } = await headOf(tx);
+      if (intact && headHash !== expected) {
+        intact = false;
+      }
+
+      return {
+        intact,
+        rows: entries.length,
+        checked: entries.length,
+        brokenAt,
+        headHash,
       };
-      break;
-    }
-    expected = entry.hash;
-  }
-
-  const { headHash } = await headOf(client);
-  if (intact && headHash !== expected) {
-    intact = false;
-  }
-
-  return {
-    intact,
-    rows: entries.length,
-    checked: entries.length,
-    brokenAt,
-    headHash,
-  };
+    },
+    { isolation: "repeatable-read" },
+  );
 }
 
 /**

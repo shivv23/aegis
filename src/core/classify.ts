@@ -86,9 +86,23 @@ async function classifyWithLLMUncached(
   purpose: string,
   endpoint: string,
 ): Promise<IntentVerdict | null> {
+  // Retry once: the first call to a cold model endpoint routinely exceeds a
+  // tight budget, and a null verdict silently skips the INTENT_ANOMALY risk
+  // bump — the worst moment for that to happen is a live demo.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const verdict = await classifyOnce(purpose, endpoint);
+    if (verdict) return verdict;
+  }
+  return null;
+}
+
+async function classifyOnce(
+  purpose: string,
+  endpoint: string,
+): Promise<IntentVerdict | null> {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
+    const timer = setTimeout(() => controller.abort(), 8000);
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const key = process.env.AEGIS_LLM_KEY;
     if (key) headers["Authorization"] = `Bearer ${key}`;
@@ -96,7 +110,7 @@ async function classifyWithLLMUncached(
       method: "POST",
       headers,
       body: JSON.stringify({
-        model: process.env.AEGIS_LLM_MODEL ?? "orcarouter/auto",
+        model: process.env.AEGIS_LLM_MODEL ?? "tencent/hy3",
         messages: [
           {
             role: "system",

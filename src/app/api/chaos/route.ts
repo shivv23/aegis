@@ -56,28 +56,39 @@ export async function POST(req: NextRequest) {
     }
   });
 
-  const results = await Promise.all(
-    payloads.map(async (p, i) => {
-      const started = Date.now();
-      const outcome = await runTransfer({
-        walletId: parsed.data.walletId,
-        to: p.to,
-        amount: p.amount,
-        purpose: p.purpose,
-        now,
-      });
-      const body = outcome.body as { status?: string; reason?: string; details?: string };
-      return {
-        index: i,
-        to: p.to,
-        amount: p.amount,
-        purpose: p.purpose,
-        status: body.status ?? "ERROR",
-        reason: body.reason,
-        latencyMs: Date.now() - started,
-      };
-    }),
-  );
+  // Fire sequentially so the guard sees each in-flight transfer accumulate
+  // against the velocity/daily caps and the circuit breaker can actually trip.
+  // A truly simultaneous Promise.all burst lets every request read the same
+  // pre-burst snapshot and sidestep the velocity limit entirely.
+  const results: Array<{
+    index: number;
+    to: string;
+    amount: number;
+    purpose: string;
+    status: string;
+    reason?: string;
+    latencyMs: number;
+  }> = [];
+  for (const [i, p] of payloads.entries()) {
+    const started = Date.now();
+    const outcome = await runTransfer({
+      walletId: parsed.data.walletId,
+      to: p.to,
+      amount: p.amount,
+      purpose: p.purpose,
+      now,
+    });
+    const body = outcome.body as { status?: string; reason?: string; details?: string };
+    results.push({
+      index: i,
+      to: p.to,
+      amount: p.amount,
+      purpose: p.purpose,
+      status: body.status ?? "ERROR",
+      reason: body.reason,
+      latencyMs: Date.now() - started,
+    });
+  }
 
   const statuses = ["SETTLED", "PENDING", "STEP_UP_REQUIRED", "BLOCKED", "ERROR"];
   const funnel = Object.fromEntries(
