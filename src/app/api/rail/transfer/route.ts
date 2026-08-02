@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { authenticate, authorize, error, json } from "@/core/api";
 import { runGuard, spendContext } from "@/core/guard";
+import { screenCounterparty } from "@/core/sanctions";
 import { HOLD_MS, STEP_UP_TTL_MS, addAudit, agentReputation, consumeNonce, createTransaction, expireStepUps, findTransactionByIdempotencyKey, getBudgetGroupForWallet, getCounterparty, groupSpendLast30d, isOrgFrozen, listAgentKeys, listTransactions, recordAnomaly, recordOutbox, resolveEffectiveWallet, settleDue, touchAgentKey } from "@/core/store";
 import { validateSignedTransfer } from "@/core/signing";
 import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "@/core/risk";
@@ -164,6 +165,7 @@ async function executeTransfer(input: {
     counterpartyStatus: counterparty?.status,
     groupLimit: group?.monthlyLimit,
     reputation,
+    sanctionsMatch: screenCounterparty({ name: counterparty?.name, address: to }),
   });
 
   if (!verdict.allowed) {

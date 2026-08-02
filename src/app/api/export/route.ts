@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { authenticate, authorize, error, json } from "@/core/api";
+import { authenticate, authorizeRead, error, json } from "@/core/api";
 import { listAudit, listTransactions } from "@/core/store";
 import { auditLogCsv, auditPackCsv, sarLiteReport } from "@/core/export";
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   const claims = await authenticate(req);
-  const authz = authorize(claims, "owner");
+  const authz = authorizeRead(claims);
   if (!authz.ok) return error(authz.reason!, 401);
 
   const kind = req.nextUrl.searchParams.get("kind") ?? "report";

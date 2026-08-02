@@ -85,6 +85,31 @@ export function authorize(
 }
 
 /**
+ * Authorizes a read-only accessor (owner or auditor). Auditor keys are the
+ * read-only reviewer role: they may inspect the ledger, audit, outbox,
+ * exports and guardian — but every mutating route keeps requiring `owner`,
+ * so an auditor can never freeze, revoke, or edit policy.
+ */
+export function authorizeRead(
+  claims: ScopedKeyClaims | null,
+  walletId?: string,
+): { ok: boolean; reason?: string } {
+  if (!claims) {
+    return { ok: false, reason: "Missing or invalid credentials" };
+  }
+  if (claims.scope !== "owner" && claims.scope !== "auditor") {
+    return {
+      ok: false,
+      reason: `Key has scope '${claims.scope}', requires 'owner' or 'auditor'`,
+    };
+  }
+  if (walletId && claims.walletId !== walletId && claims.walletId !== "*") {
+    return { ok: false, reason: "Key is not authorized for this wallet" };
+  }
+  return { ok: true };
+}
+
+/**
  * Authorizes an owner key against an organization. The master key ("*", no
  * org) may manage any org; an org-scoped owner key may only manage wallets
  * inside its own org.

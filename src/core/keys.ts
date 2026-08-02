@@ -11,7 +11,7 @@ export function signKey(walletId: string, scope: Scope, keyId?: string, orgId?: 
   const claims: ScopedKeyClaims = {
     walletId,
     scope,
-    role: scope === "owner" ? "wallet-owner" : "agent",
+    role: scope === "owner" ? "wallet-owner" : scope === "auditor" ? "auditor" : "agent",
     ...(keyId ? { keyId } : {}),
     ...(orgId ? { orgId } : {}),
   };
@@ -33,7 +33,7 @@ export async function verifyKey(
     });
     if (
       typeof payload.walletId === "string" &&
-      (payload.scope === "agent" || payload.scope === "owner")
+      (payload.scope === "agent" || payload.scope === "owner" || payload.scope === "auditor")
     ) {
       return {
         walletId: payload.walletId,

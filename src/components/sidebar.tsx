@@ -20,6 +20,8 @@ import {
   Home,
   Receipt,
   Network,
+  ShieldAlert,
+  Route,
 } from "lucide-react";
 
 const links = [
@@ -27,6 +29,8 @@ const links = [
   { href: "/", label: "Command Center", icon: LayoutDashboard },
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
   { href: "/audit", label: "Audit Trail", icon: ScrollText },
+  { href: "/explorer", label: "Settlement Explorer", icon: Route },
+  { href: "/security", label: "Security Events", icon: ShieldAlert },
   { href: "/webhooks", label: "Webhooks", icon: Webhook },
   { href: "/sessions", label: "Sessions", icon: KeyRound },
   { href: "/auth", label: "Sign In", icon: ShieldCheck },

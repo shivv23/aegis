@@ -124,6 +124,7 @@ const spec = {
     "/api/breaker": { get: { summary: "Circuit-breaker state per wallet." } },
     "/api/simulate": { post: { summary: "What-if: replay history against a hypothetical policy." } },
     "/api/rails": { get: { summary: "Active settlement rail + available rails." } },
+    "/api/security": { get: { summary: "Security events feed: failed auth + sensitive actions, curated from the request audit.", description: "?limit= (default 200, max 500) — auditor and owner can read." } },
     "/api/guardian": { get: { summary: "On-chain mirror: Guardian/PolicyRegistry addresses, live contract state (paused/limits) and the sealed policy hash with match proof." } },
     "/api/signers": {
       get: { summary: "List multi-sig signers." },

@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { authenticate, authorize, error, json } from "@/core/api";
+import { authenticate, authorize, authorizeRead, error, json } from "@/core/api";
 import { getRail, listRails, railIsSimulated, railSimulationReason } from "@/core/rails";
 import { getWallet, setWalletPreferredRail } from "@/core/store";
 
@@ -24,7 +24,7 @@ function railStatus(id: string) {
  */
 export async function GET(req: NextRequest) {
   const claims = await authenticate(req);
-  const authz = authorize(claims, "owner");
+  const authz = authorizeRead(claims);
   if (!authz.ok) return error(authz.reason!, 401);
 
   const active = getRail().id;

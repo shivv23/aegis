@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { authenticate, authorize, error, json } from "@/core/api";
+import { authenticate, authorizeRead, error, json } from "@/core/api";
 import { verifyLedger } from "@/core/store";
 
 export const runtime = "nodejs";
@@ -11,7 +11,7 @@ export const runtime = "nodejs";
  */
 export async function GET(req: NextRequest) {
   const claims = await authenticate(req);
-  const authz = authorize(claims, "owner");
+  const authz = authorizeRead(claims);
   if (!authz.ok) return error(authz.reason!, 401);
 
   const proof = await verifyLedger();

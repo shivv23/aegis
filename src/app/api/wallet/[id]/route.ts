@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import { authenticate, authorize, authorizeWalletOrg, error, json } from "@/core/api";
+import { authenticate, authorize, authorizeRead, authorizeWalletOrg, error, json } from "@/core/api";
 import { addAudit, getPendingPolicy, getWallet, listAudit, listPolicyVersions, listTransactions, settleDue, updatePolicy } from "@/core/store";
 
 export const runtime = "nodejs";
@@ -11,7 +11,7 @@ export async function GET(
 ) {
   const { id } = await params;
   const claims = await authenticate(_req);
-  const authz = authorize(claims, "owner");
+  const authz = authorizeRead(claims);
   if (!authz.ok) return error(authz.reason!, 401);
 
   await settleDue();

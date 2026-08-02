@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { authenticate, authorize, error, json } from "@/core/api";
+import { authenticate, authorizeRead, error, json } from "@/core/api";
 import { listBudgetGroups, listTransactions, settleDue } from "@/core/store";
 import { forecastAll } from "@/core/budget";
 
@@ -9,7 +9,7 @@ const DAY = 24 * 60 * 60 * 1000;
 
 export async function GET(req: NextRequest) {
   const claims = await authenticate(req);
-  const authz = authorize(claims, "owner");
+  const authz = authorizeRead(claims);
   if (!authz.ok) return error(authz.reason!, 401);
 
   await settleDue();

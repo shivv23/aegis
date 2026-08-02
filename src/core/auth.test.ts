@@ -7,13 +7,18 @@ import {
   verifyMagicToken,
   verifyMagicTokenClaims,
 } from "@/core/auth";
+import { authorize, authorizeRead } from "@/core/api";
+import { signKey, verifyKey } from "@/core/keys";
 import {
   consumeMagicToken,
   createSession,
   getSession,
   getStore,
   isApiKeyRevoked,
+  listRequestAudit,
+  listSecurityEvents,
   listSessions,
+  recordRequestAudit,
   revokeApiKeyByHash,
   revokeSession,
 } from "@/core/store";
@@ -95,6 +100,71 @@ describe("auth hardening (P2-2)", () => {
     // Idempotent: revoking the same hash again must not throw (ON CONFLICT).
     await revokeApiKeyByHash(hash, "owner");
     expect(await isApiKeyRevoked(hash)).toBe(true);
+  });
+});
+
+describe("auditor read-only role", () => {
+  it("mints and verifies an auditor-scoped key", async () => {
+    const claims = await verifyKey(await signKey("*", "auditor"));
+    expect(claims?.scope).toBe("auditor");
+    expect(claims?.role).toBe("auditor");
+  });
+
+  it("auditor can read but never write (authorizeRead vs authorize)", async () => {
+    const auditor = await verifyKey(await signKey("*", "auditor"));
+    expect(authorizeRead(auditor).ok).toBe(true);
+    // The same key fails the owner check every mutating route uses.
+    expect(authorize(auditor, "owner").ok).toBe(false);
+  });
+
+  it("auditor is still wallet-scoped when minted per wallet", async () => {
+    const auditor = await verifyKey(await signKey("wallet-a", "auditor"));
+    expect(authorizeRead(auditor, "wallet-a").ok).toBe(true);
+    expect(authorizeRead(auditor, "wallet-b").ok).toBe(false);
+  });
+});
+
+describe("security events feed", () => {
+  it("curates failed auth and sensitive actions out of the request audit", async () => {
+    await recordRequestAudit({
+      method: "GET",
+      path: "/api/transactions",
+      keyHash: "aaaa",
+      scope: "owner",
+      result: "OK",
+    });
+    await recordRequestAudit({
+      method: "GET",
+      path: "/api/wallet",
+      keyHash: "bbbb",
+      scope: "auditor",
+      result: "INVALID",
+    });
+    await recordRequestAudit({
+      method: "POST",
+      path: "/api/wallet/wallet-x/freeze",
+      keyHash: "cccc",
+      scope: "owner",
+      result: "OK",
+    });
+    await recordRequestAudit({
+      method: "GET",
+      path: "/api/currencies",
+      keyHash: "dddd",
+      scope: "auditor",
+      result: "OK",
+    });
+
+    const events = await listSecurityEvents();
+    const paths = events.map((e) => e.path);
+    // The benign read is filtered out; failed auth + freeze are kept.
+    expect(paths).not.toContain("/api/transactions");
+    expect(paths).not.toContain("/api/currencies");
+    expect(paths).toContain("/api/wallet");
+    expect(paths).toContain("/api/wallet/wallet-x/freeze");
+
+    const all = await listRequestAudit();
+    expect(all.length).toBeGreaterThanOrEqual(4);
   });
 });
 

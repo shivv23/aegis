@@ -76,6 +76,7 @@ const reasonTones: Record<string, string> = {
   RISK_REJECTED: "text-danger",
   STEP_UP_DECLINED: "text-warn",
   STEP_UP_EXPIRED: "text-warn",
+  SANCTIONED: "text-danger",
 };
 
 export function TxBadge({ status }: { status: TxStatus }) {

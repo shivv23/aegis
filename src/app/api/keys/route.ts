@@ -15,6 +15,18 @@ export async function GET(req: NextRequest) {
   const walletId = req.nextUrl.searchParams.get("walletId");
   if (!walletId) return error("walletId query param required", 400);
 
+  const role = req.nextUrl.searchParams.get("role");
+
+  // Auditor: a read-only reviewer credential. It can inspect ledger, audit,
+  // outbox, exports and guardian — never mutate anything (write routes
+  // require `owner`).
+  if (role === "auditor") {
+    return json({
+      auditorKey: await signKey(walletId, "auditor"),
+      scope: "auditor",
+    });
+  }
+
   return json({
     ownerKey: await masterOwnerKey(),
     walletOwnerKey: await signKey(walletId, OWNER),

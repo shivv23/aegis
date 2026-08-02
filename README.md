@@ -4,7 +4,7 @@
 
 > Enforcement lives in the wallet layer, not the agent's head.
 
-**🚀 Live app: https://aegis-shivv23s-projects.vercel.app** · 7-minute demo script: [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) · new-feature roadmap: [`newFeatures.md`](newFeatures.md)
+**🚀 Live app: https://aegis-shivv23s-projects.vercel.app**
 
 Autonomous agents hold wallets and transact unsupervised. A compromised,
 buggy, or overzealous agent can spend faster than any human can react.
@@ -70,6 +70,9 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Multi-tenant orgs** | Keys | orgs with per-org wallets, org-scoped owner keys and auth on wallet routes |
 | **Spending windows + geo** | Guard | policy can restrict transfers to UTC hours (`spendingWindows`) and to approved regions (`regionAllowlist`); a `x-aegis-region` header carries the region claim |
 | **Counterparty registry** | Guard | counterparties carry status/flags/reputation; `BLOCKED` counterparties are rejected before any other check |
+| **Sanctions screening (OFAC-lite)** | Guard | a watchlist matcher runs before any money moves — a hit blocks with `SANCTIONED` regardless of allowlist, and registering a sanctioned payee auto-blocks + stamps it |
+| **Read-only auditor role** | Keys | `scope: auditor` keys can inspect ledger/audit/outbox/export/guardian but every mutating route still requires `owner` — separation of duties |
+| **Security events feed** | Ops | `/api/security` + UI: a SIEM-lite feed of failed auth (invalid/revoked/unauthorized) and sensitive actions (admin, freeze, policy, key, signer) |
 | **Budget groups** | Guard | cross-wallet monthly caps — the whole fleet is bound by one org budget, not just a single wallet |
 | **Conditional escrows** | Wallet | funds are debited into an escrow and released only when a condition is met (or refunded back) |
 | **Usage metering** | Wallet | per-wallet usage rows + totals and per-rail breakdown for billing |
@@ -154,6 +157,8 @@ const r = await agent.transfer({ to: "compute:0xCAFE0001", amount: 30, purpose: 
 
 - **Home** (`/home`) — marketing landing: product, pricing, proof
 - **Command Center** (`/`) — live SSE feed, kill switch, wallet registry
+- **Settlement Explorer** (`/explorer`) — every settled transfer's reference rendered as a trace, honestly labeled (in-process / mock bank / on-chain-style)
+- **Security Events** (`/security`) — SIEM-lite feed: failed auth + sensitive actions, curated from the request audit
 - **Agent Simulator** (`/simulator`) — hostile-agent attack presets against the real rail
 - **Policy Sandbox** (`/sandbox`) — one-click what-if scenarios
 - **Multi-sig** (`/multisig`) — 2-of-3 signer approval console (seed demo has 2 registered signers; add a third to watch the flow)
@@ -182,6 +187,7 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `GET` | `/api/breaker` | Circuit-breaker state per wallet |
 | `POST` | `/api/simulate` | What-if: replay a wallet&apos;s real history against a hypothetical policy |
 | `GET` | `/api/rails` | Active settlement rail + available rails |
+| `GET` | `/api/security` | Security events feed (failed auth + sensitive actions) |
 | `GET` | `/api/guardian` | On-chain mirror: addresses, **live** paused/limits, sealed policy hash + match proof |
 | `GET/POST` | `/api/orgs` | List / create multi-tenant organizations |
 | `GET` | `/api/orgs/:id` | Organization + its wallets |
@@ -193,11 +199,11 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `GET` | `/api/transactions` | Ledger view |
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
-| `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys + list agent keys (lifecycle) |
+| `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys + list agent keys (lifecycle); `?role=auditor` mints a read-only auditor key |
 | `POST` | `/api/keys/mint` | Mint an **Ed25519 agent keypair** (signed identity) |
 | `POST` | `/api/keys/revoke` | Revoke an agent Ed25519 public key |
 | `POST` | `/api/keys/rotate` | Rotate: revoke old key + return a fresh keypair |
-| `GET/POST` | `/api/counterparties` | List / upsert counterparty registry (BLOCKED stops transfers) |
+| `GET/POST` | `/api/counterparties` | List / upsert counterparty registry (BLOCKED stops transfers; sanctions hits auto-block) |
 | `GET/POST` | `/api/budget-groups` | List (`?walletId=` resolves group) / create cross-wallet budget groups |
 | `GET/POST/PATCH` | `/api/escrows` | List / create escrow / release or refund (`?id=&action=release\|refund`) |
 | `GET` | `/api/usage` | Usage metering: rows, totals, per-rail breakdown |

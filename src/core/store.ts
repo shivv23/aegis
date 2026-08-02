@@ -2853,21 +2853,48 @@ export async function listRequestAudit(limit = 200): Promise<RequestAuditEntry[]
     "SELECT * FROM request_audit ORDER BY ts DESC LIMIT ?",
     [limit],
   );
-  return rows.map((r) => {
-    const row = r as Record<string, unknown>;
-    return {
-      id: row.id as string,
-      ts: Number(row.ts),
-      method: row.method as string,
-      path: row.path as string,
-      keyHash: row.key_hash ? (row.key_hash as string) : undefined,
-      scope: row.scope ? (row.scope as string) : undefined,
-      walletId: row.wallet_id ? (row.wallet_id as string) : undefined,
-      ip: row.ip ? (row.ip as string) : undefined,
-      userAgent: row.user_agent ? (row.user_agent as string) : undefined,
-      result: row.result as string,
-    };
-  });
+  return rows.map((r) => rowToRequestAudit(r as Record<string, unknown>));
+}
+
+/**
+ * Security events feed: a curated slice of the request audit — failed auth
+ * (invalid / revoked / unauthorized tokens), plus any sensitive action
+ * (admin, freeze, policy, key and signer changes). Powers the SIEM-lite view
+ * so an operator can see the system watching itself.
+ */
+export async function listSecurityEvents(limit = 200): Promise<RequestAuditEntry[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    `SELECT * FROM request_audit
+     WHERE result IN ('INVALID', 'REVOKED', 'UNAUTHORIZED')
+        OR path LIKE '/api/admin/%'
+        OR path LIKE '%/freeze'
+        OR path LIKE '%/unfreeze'
+        OR path LIKE '%/revoke'
+        OR path LIKE '/api/keys%'
+        OR path LIKE '/api/signers%'
+        OR path LIKE '/api/settings%'
+        OR path LIKE '/api/audit/requests%'
+     ORDER BY ts DESC LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => rowToRequestAudit(r as Record<string, unknown>));
+}
+
+function rowToRequestAudit(row: Record<string, unknown>): RequestAuditEntry {
+  return {
+    id: row.id as string,
+    ts: Number(row.ts),
+    method: row.method as string,
+    path: row.path as string,
+    keyHash: row.key_hash ? (row.key_hash as string) : undefined,
+    scope: row.scope ? (row.scope as string) : undefined,
+    walletId: row.wallet_id ? (row.wallet_id as string) : undefined,
+    ip: row.ip ? (row.ip as string) : undefined,
+    userAgent: row.user_agent ? (row.user_agent as string) : undefined,
+    result: row.result as string,
+  };
 }
 
 export async function resetRequestAudit(): Promise<void> {

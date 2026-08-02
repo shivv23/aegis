@@ -157,7 +157,8 @@ export type RejectionReason =
   | "COUNTERPARTY_BLOCKED"
   | "GROUP_LIMIT_EXCEEDED"
   | "ORGANIZATION_FROZEN"
-  | "REPUTATION_BLOCKED";
+  | "REPUTATION_BLOCKED"
+  | "SANCTIONED";
 
 export interface Transaction {
   id: string;
@@ -190,7 +191,7 @@ export interface AuditLogEntry {
   timestamp: number;
 }
 
-export type Scope = "agent" | "owner";
+export type Scope = "agent" | "owner" | "auditor";
 
 export interface ScopedKeyClaims {
   walletId: string;

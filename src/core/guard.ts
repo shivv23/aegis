@@ -1,4 +1,5 @@
 import type { RejectionReason, Transaction, Wallet } from "./types";
+import type { SanctionsMatch } from "./sanctions";
 
 export interface GuardContext {
   spentLast24h: number;
@@ -160,6 +161,25 @@ export function checkCounterparty(
   return ok();
 }
 
+/**
+ * Sanctions screen: a payee on the watchlist never clears the guard, no
+ * matter what the policy or allowlist says. Runs early in the chain so the
+ * reason is always SANCTIONED, not a policy/allowlist error.
+ */
+export function checkSanctions(
+  match: SanctionsMatch | undefined | null,
+  to: string,
+): GuardResult {
+  if (match) {
+    const e = match.entry;
+    return deny(
+      "SANCTIONED",
+      `Counterparty ${to} matched sanctions list entry '${e.name}' (${e.category}, program ${e.programs.join("/")})`,
+    );
+  }
+  return ok();
+}
+
 /** Budget group: cross-wallet spend is capped at the group level. */
 export function checkGroupBudget(
   groupLimit: number | undefined,
@@ -210,10 +230,13 @@ export function runGuard(
     groupLimit?: number;
     /** Agent reputation (0–100, D5). Only enforced when explicitly provided. */
     reputation?: number;
+    /** Sanctions watchlist hit (OFAC-lite). Blocked before policy/allowlist. */
+    sanctionsMatch?: SanctionsMatch | null;
   },
 ): GuardResult {
   const checks: GuardResult[] = [
     checkFreeze(wallet),
+    checkSanctions(extra?.sanctionsMatch, to),
     checkPerTxLimit(wallet, amount),
     checkAllowlist(wallet, to),
     checkSpendingWindow(wallet, context.now ?? Date.now()),
