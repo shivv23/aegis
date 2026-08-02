@@ -142,7 +142,24 @@ export function listRails(): Rail[] {
   }));
 }
 
-/** True when a rail needs an external gateway we do not (yet) simulate. */
+/** True when a rail settles without moving real money (no external gateway). */
 export function railIsSimulated(id: string): boolean {
-  return id === "usdc-testnet" && !process.env.AEGIS_CIRCLE_API_KEY;
+  if (id === "usdc-testnet") return !process.env.AEGIS_CIRCLE_API_KEY;
+  // sandbox and ach-lite are in-process/mock executors by design — they
+  // settle with local refs and never leave the app. Honest labeling (P0-2):
+  // no external gateway exists for either, so they are simulated.
+  return true;
+}
+
+/** Why a rail is currently simulated (or not) — for the UI/API, P0-2. */
+export function railSimulationReason(id: string): string {
+  if (id === "usdc-testnet") {
+    return process.env.AEGIS_CIRCLE_API_KEY
+      ? "Circle sandbox gateway configured — real USDC testnet settlement."
+      : "No AEGIS_CIRCLE_API_KEY configured — settles with a deterministic simulated on-chain reference.";
+  }
+  if (id === "ach-lite") {
+    return "Mock bank rail — settles with a synthetic ach:// reference. No real bank gateway exists.";
+  }
+  return "In-process demo rail — settles instantly inside the app with local:// refs. No real money moves.";
 }

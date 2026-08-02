@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { authenticate, authorize, error, json } from "@/core/api";
-import { getRail, listRails, railIsSimulated } from "@/core/rails";
+import { getRail, listRails, railIsSimulated, railSimulationReason } from "@/core/rails";
 import { getWallet, setWalletPreferredRail } from "@/core/store";
 
 export const runtime = "nodejs";
@@ -8,9 +8,7 @@ export const runtime = "nodejs";
 function railStatus(id: string) {
   return {
     simulated: railIsSimulated(id),
-    reason: railIsSimulated(id)
-      ? "No external gateway configured — settles with a deterministic simulated reference."
-      : "Live settlement via the external gateway.",
+    reason: railSimulationReason(id),
   };
 }
 

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { authenticate, error, json } from "@/core/api";
-import { getRail, listRails, railIsSimulated } from "@/core/rails";
+import { getRail, listRails, railIsSimulated, railSimulationReason } from "@/core/rails";
 import { getWallet } from "@/core/store";
 
 export const runtime = "nodejs";
@@ -33,14 +33,13 @@ export async function GET(req: NextRequest) {
     rails: {
       active,
       activeSimulated: railIsSimulated(active),
-      note: railIsSimulated(active)
-        ? "Active rail is simulated in-process. Set AEGIS_CIRCLE_API_KEY (USDC testnet) or AEGIS_RAIL to route through a live gateway."
-        : "Active rail settles through a configured external gateway.",
+      note: railSimulationReason(active),
       available: listRails().map(({ id, name, description }) => ({
         id,
         name,
         description,
         simulated: railIsSimulated(id),
+        reason: railSimulationReason(id),
       })),
     },
   });
