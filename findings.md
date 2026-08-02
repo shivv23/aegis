@@ -15,13 +15,13 @@ judge will reach · **P2** = quality/correctness gap · **N** = note.
 | ID | Status | What changed |
 |---|---|---|
 | P0-1 | ✅ Fixed | Live policy aligned to the sealed hash; guardian reports `sealState` + `comparedWallet`; `POST /api/admin/reseal` + `contracts/scripts/reseal.ts` for future re-seals; panel only shows green on `verified` |
-| P0-2 | ✅ Fixed | `/api/rails` and `/api/rail/health` now report `simulated: true` per rail with an explicit reason; panel/README honest about no gateway configured |
+| P0-2 | ✅ Fixed | `/api/rails` and `/api/rail/health` now report `simulated: true` per rail with an explicit reason; panel/README honest about no gateway configured. Live re-verify caught the first pass only fixing usdc-testnet — `railIsSimulated()` now returns true for all three rails (sandbox/ach-lite were still lying `simulated:false`) |
 | P1-1 | ✅ Fixed | In-app "Ops outbox · delivery log" on `/alerts` renders queued events with real approve/decline deep-links; delivery remains webhook-first, Slack/Resend slot in via env |
 | P1-2 | ✅ Fixed | `REPUTATION_BLOCKED` no longer deepens its own penalty; operator reset endpoint `POST /api/admin/reputation/reset` + in-memory reset window; tests added |
 | P1-3 | ✅ Fixed | Audit page now uses server-side cursor pagination + search (`/api/audit?limit&cursor&search`); transactions page already paged |
 | P1-4 | ✅ Fixed | `/wallet` registry shows a guided empty state (scroll-to-form CTA) when no wallets exist |
 | P2-1 | ✅ Fixed | "Reset demo" now requires an explicit confirmation dialog with wipe wording; reset disabled while busy |
-| P2-2 | ✅ Fixed | Magic links are single-use (`consumeMagicToken`, migration 14); sign-out revokes the owner key (denylist by hash); rate limiting was already wired via `src/proxy.ts` (noted below) |
+| P2-2 | ✅ Fixed | Magic links are single-use (`consumeMagicToken`, migration 14); sign-out revokes the owner key (denylist by hash); rate limiting was already wired via `src/proxy.ts` (noted below). Live re-verify caught a prod-only bug: `revokeApiKeyByHash` used SQLite `INSERT OR IGNORE`, which 500'd on Postgres — now `ON CONFLICT ... DO NOTHING`, verified live (key rejected with 401 after sign-out) |
 | P2-3 | ✅ Fixed | `/api/health` reports `checks.db.type`; `.env.example` documents the full env surface incl. auth, notifications, rate-limit knobs |
 | N-1 | ✅ Fixed | Analytics chart title now says "by requested day" |
 | N-2 | ✅ Fixed | README/whitepaper copy softened (alert delivery honest, multi-sig seeded note); test counts updated to 268/38; "3-of-2" typo fixed |
