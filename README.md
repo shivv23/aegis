@@ -4,6 +4,8 @@
 
 > Enforcement lives in the wallet layer, not the agent's head.
 
+**🚀 Live app: https://aegis-shivv23s-projects.vercel.app** · 7-minute demo script: [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) · new-feature roadmap: [`newFeatures.md`](newFeatures.md)
+
 Autonomous agents hold wallets and transact unsupervised. A compromised,
 buggy, or overzealous agent can spend faster than any human can react.
 AEGIS is a wallet-layer enforcement system: spend limits, allowlisted
