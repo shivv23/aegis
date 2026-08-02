@@ -106,7 +106,7 @@ async function classifyWithLLMUncached(
           { role: "user", content: `Purpose: ${purpose}` },
         ],
         temperature: 0,
-        max_tokens: 64,
+        max_tokens: 256,
       }),
       signal: controller.signal,
     });
