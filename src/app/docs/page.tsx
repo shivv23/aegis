@@ -224,7 +224,7 @@ export default function DocsPage() {
 {`npx tsx scripts/aegis.ts bootstrap                       # master key + wallets
 npx tsx scripts/aegis.ts status                          # rail health + ledger verify
 npx tsx scripts/aegis.ts transfer \\
-  --wallet wallet-tradingbot-42 --to compute:0xCAFE0001 \\
+  --wallet <wallet-id> --to <allowlisted-counterparty> \\
   --amount 30 --purpose "GPU burst"                      # signed transfer + verdict
 npx tsx scripts/aegis.ts help`}
             </pre>
