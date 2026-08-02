@@ -39,6 +39,7 @@ const patchSchema = z.object({
     .array(z.object({ startHour: z.number().int().min(0).max(23), endHour: z.number().int().min(0).max(23) }))
     .optional(),
   regionAllowlist: z.array(z.string().min(1)).optional(),
+  requireApproval: z.boolean().optional(),
 });
 
 export async function PATCH(
@@ -47,7 +48,7 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const claims = await authenticate(req);
-  const authz = authorize(claims, "owner");
+  const authz = authorize(claims, "owner", undefined, "policy");
   if (!authz.ok) return error(authz.reason!, 401);
 
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
@@ -58,19 +59,32 @@ export async function PATCH(
   const orgz = authorizeWalletOrg(claims, existing.orgId);
   if (!orgz.ok) return error(orgz.reason!, 403);
 
-  const result = await updatePolicy(id, parsed.data, claims!.walletId);
+  const result = await updatePolicy(id, parsed.data, claims!.walletId, {
+    requireApproval: parsed.data.requireApproval,
+  });
   if (!result) return error("Wallet not found", 404);
 
-  const { wallet, pending } = result;
+  const { wallet, pending, approval } = result;
+  const pendingId = pending ?? approval;
 
   await addAudit({
     walletId: id,
     actor: "owner",
-    action: "POLICY_UPDATED",
-    details: `Policy changed, effective ${
-      pending.effectiveAt <= Date.now() ? "immediately" : `at ${new Date(pending.effectiveAt).toISOString()}`
-    } (hash ${pending.policyHash.slice(0, 12)}): ${JSON.stringify(parsed.data)}`,
+    action: approval ? "POLICY_CHANGE_PROPOSED" : "POLICY_UPDATED",
+    details: approval
+      ? `Policy change submitted for 2-of-3 signer approval (${approval.id}); effective once approved + timelock elapses`
+      : `Policy changed, effective ${
+          pendingId && pendingId.effectiveAt <= Date.now() ? "immediately" : `at ${pendingId ? new Date(pendingId.effectiveAt).toISOString() : "n/a"}`
+        } (hash ${pendingId.policyHash.slice(0, 12)}): ${JSON.stringify(parsed.data)}`,
   });
 
-  return json({ wallet, pendingPolicy: pending });
+  return json({
+    wallet,
+    pendingPolicy: pendingId,
+    requiresApproval: Boolean(approval),
+    approval,
+    note: approval
+      ? "This policy change will not apply until 2-of-3 signers approve and the timelock elapses."
+      : undefined,
+  });
 }

@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
   return json(
     {
       signer: { id: signer.id, name: signer.name, role: signer.role, enabled: signer.enabled },
-      key: await signKey("*", "owner", signer.id),
+      key: await signKey("*", "owner", { keyId: signer.id }),
       warning: "Hand this key to the signer. It is shown only once.",
     },
     201,

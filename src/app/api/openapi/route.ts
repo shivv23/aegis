@@ -58,6 +58,26 @@ const spec = {
       },
     },
     "/api/rail/health": { get: { summary: "Verify scoped agent identity." } },
+    "/api/rail/batch": {
+      post: {
+        summary: "Batch transfers through the same guard.",
+        description:
+          "POST rows of {to, amount, purpose} or an array; every row passes validate() before any settle. One rejected row blocks the batch and records STRUCTURING/aggregate checks.",
+      },
+    },
+    "/api/recurring": {
+      get: { summary: "List recurring schedules." },
+      post: { summary: "Create a recurring schedule (interval, day, wallet). Runs on cron; policy is re-checked at execution time." },
+    },
+    "/api/cron/jobs": { post: { summary: "Cron hook: runs due recurring payments." } },
+    "/api/fund": {
+      get: { summary: "List simulated funding deposits." },
+      post: { summary: "Simulated deposit — credits the ledger with a bank-style ref (simulated:true). No real money moves." },
+    },
+    "/api/withdraw": {
+      get: { summary: "List simulated withdrawals." },
+      post: { summary: "Simulated withdrawal — debits the ledger with a bank-style ref (simulated:true)." },
+    },
     "/api/wallet": {
       post: { summary: "Provision a wallet + policy; returns owner & agent keys." },
       get: { summary: "List wallets." },
@@ -85,7 +105,7 @@ const spec = {
     "/api/transactions/stream": { get: { summary: "SSE live feed." } },
     "/api/keys": { get: { summary: "Mint scoped owner/agent JWT keys (master key), or list agent keys + lifecycle for a wallet." } },
     "/api/keys/mint": {
-      post: { summary: "Mint an Ed25519 agent keypair — the agent's identity." },
+      post: { summary: "Mint an Ed25519 agent keypair — the agent's identity. ?scope= with actions[] (freeze/policy/audit) and ttl mints an action-scoped owner key." },
     },
     "/api/keys/revoke": {
       post: { summary: "Revoke an agent Ed25519 public key (rotates it out of the allowlist)." },
@@ -93,6 +113,22 @@ const spec = {
     "/api/keys/rotate": {
       post: { summary: "Rotate: revoke the old key, mint a fresh keypair, return the new private key." },
     },
+    "/api/keys/verify": {
+      post: { summary: "Verify an Ed25519 signature offline: {publicKey, message, signature} → {ok}." },
+    },
+    "/api/passkey/register": {
+      get: { summary: "Begin WebAuthn registration: returns challenge + expected options." },
+      post: { summary: "Verify a completed registration and persist the hardware-key credential." },
+    },
+    "/api/passkey/assert": {
+      get: { summary: "Begin WebAuthn assertion (for step-up approval with a registered passkey)." },
+      post: { summary: "Verify a passkey assertion and authorize the step-up decision." },
+    },
+    "/api/searches": {
+      get: { summary: "List persisted transaction searches." },
+      post: { summary: "Save a transaction filter as a named search." },
+    },
+    "/api/searches/{id}": { delete: { summary: "Delete a saved search." } },
     "/api/counterparties": {
       get: { summary: "List counterparty registry (reputation, totals, flags)." },
       post: { summary: "Upsert a counterparty (ACTIVE/FLAGGED/BLOCKED); BLOCKED stops all transfers to it." },
@@ -115,12 +151,21 @@ const spec = {
     "/api/export": {
       get: {
         summary: "Regulator export pack.",
-        description: "?kind=audit.csv | auditlog.csv | audit.json (flat pack) | report (SAR-lite monthly JSON).",
+        description: "?kind=audit.csv | auditlog.csv | audit.json (signed Ed25519 pack + ledger head hash) | report (SAR-lite monthly JSON) | verify (check the pack signature + ledger head).",
       },
     },
     "/api/ledger/verify": { get: { summary: "Prove the hash chain is intact." } },
     "/api/audit": { get: { summary: "Audit trail (cursor-paginated).", description: "?walletId=&limit=&cursor= — keyset pages, newest first." } },
     "/api/outbox": { get: { summary: "Ops alert feed (guard decisions + wallet events), cursor-paginated.", description: "?walletId=&limit=&cursor=" } },
+    "/api/outbox/{id}/ack": {
+      post: { summary: "Acknowledge an alert with who + why. The ack is itself audited." },
+    },
+    "/api/transactions/{id}/timeline": {
+      get: { summary: "Per-tx lifecycle hops from stored timestamps (requested → hold → settled/blocked/revoked) + latency percentiles." },
+    },
+    "/api/chaos": {
+      get: { summary: "Chaos-lab: run a load mix (valid/chaos/velocity) against the real rail; returns funnel + latency + breaker telemetry." },
+    },
     "/api/breaker": { get: { summary: "Circuit-breaker state per wallet." } },
     "/api/simulate": { post: { summary: "What-if: replay history against a hypothetical policy." } },
     "/api/rails": { get: { summary: "Active settlement rail + available rails." } },

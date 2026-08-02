@@ -29,6 +29,8 @@ import type {
   WebhookDelivery,
   WebhookDeliveryStatus,
   WebhookEndpoint,
+  RecurringSchedule,
+  WebauthnCredential,
 } from "./types";
 import { assertTransition } from "./stateMachine";
 import { appendLedgerRow, GENESIS_HASH, rechain, txContent, auditContent, verifyLedger as verifyChain } from "./ledger";
@@ -43,6 +45,9 @@ export const HOLD_MS = Number(process.env.AEGIS_HOLD_MS ?? 5000);
 
 /** How long an owner has to approve/reject a high-risk transfer. */
 export const STEP_UP_TTL_MS = Number(process.env.AEGIS_STEPUP_TTL_MS ?? 120000);
+
+/** Escalation fires when a step-up decision is this close to its TTL. */
+export const ESCALATION_GRACE_MS = Number(process.env.AEGIS_ESCALATION_GRACE_MS ?? 15000);
 
 /** Circuit breaker: N guard anomalies within the window → auto-freeze. */
 export const BREAKER_THRESHOLD = Number(process.env.AEGIS_BREAKER_THRESHOLD ?? 5);
@@ -656,6 +661,78 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    // Governance + funding + ops (new-feature round 2): per-key action
+    // scoping, policy-change approvals, funding lifecycle (deposit/withdraw),
+    // recurring schedules, threshold-alert acks, and FIDO2 passkeys.
+    version: 15,
+    name: "governance-funding-ops",
+    up: async (client) => {
+      if (!(await hasColumn(client, "transactions", "kind"))) {
+        await client.execute(
+          "ALTER TABLE transactions ADD COLUMN kind TEXT NOT NULL DEFAULT 'transfer'",
+        );
+      }
+      if (!(await hasColumn(client, "policy_versions", "approval_id"))) {
+        await client.execute("ALTER TABLE policy_versions ADD COLUMN approval_id TEXT");
+      }
+      if (!(await hasColumn(client, "approvals", "payload"))) {
+        await client.execute("ALTER TABLE approvals ADD COLUMN payload TEXT");
+      }
+      if (!(await hasColumn(client, "outbox", "acked_at"))) {
+        await client.execute("ALTER TABLE outbox ADD COLUMN acked_at BIGINT");
+        await client.execute("ALTER TABLE outbox ADD COLUMN acked_by TEXT");
+        await client.execute("ALTER TABLE outbox ADD COLUMN ack_note TEXT");
+      }
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS recurring_schedules (
+          id TEXT PRIMARY KEY,
+          wallet_id TEXT NOT NULL,
+          "to" TEXT NOT NULL,
+          amount REAL NOT NULL,
+          purpose TEXT NOT NULL,
+          every_hours REAL NOT NULL,
+          daily_hour INTEGER,
+          next_run_at BIGINT NOT NULL,
+          created_at BIGINT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          last_run_at BIGINT,
+          run_count INTEGER NOT NULL DEFAULT 0
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS webauthn_credentials (
+          id TEXT PRIMARY KEY,
+          owner TEXT NOT NULL,
+          name TEXT NOT NULL,
+          credential_id TEXT NOT NULL,
+          public_key TEXT NOT NULL,
+          counter INTEGER NOT NULL DEFAULT 0,
+          transports TEXT,
+          created_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS webauthn_challenges (
+          challenge TEXT PRIMARY KEY,
+          owner TEXT NOT NULL,
+          purpose TEXT NOT NULL,
+          tx_id TEXT,
+          created_at BIGINT NOT NULL,
+          expires_at BIGINT NOT NULL
+        )
+      `);
+      await client.execute(`
+        CREATE TABLE IF NOT EXISTS saved_searches (
+          id TEXT PRIMARY KEY,
+          owner TEXT NOT NULL,
+          name TEXT NOT NULL,
+          filters TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 async function applyMigrations(client: Db): Promise<void> {
@@ -863,6 +940,16 @@ export function verifyLedger() {
   return s.ready.then(() => verifyChain(s.client));
 }
 
+/** Head hash of the hash-chained ledger (for signed export proofs). */
+export async function ledgerHeadHash(): Promise<string> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT head_hash FROM ledger_state WHERE id = 1",
+  );
+  return rows[0] ? String(rows[0].head_hash) : GENESIS_HASH;
+}
+
 export async function recordOutbox(
   walletId: string,
   eventType: string,
@@ -907,6 +994,9 @@ export async function listOutbox(walletId?: string): Promise<OutboxEntry[]> {
     createdAt: Number(r.created_at),
     deliveredAt: r.delivered_at ? Number(r.delivered_at) : undefined,
     attemptCount: Number(r.attempt_count),
+    ackedAt: r.acked_at ? Number(r.acked_at) : undefined,
+    ackedBy: r.acked_by ? (r.acked_by as string) : undefined,
+    ackNote: r.ack_note ? (r.ack_note as string) : undefined,
   }));
 }
 
@@ -957,6 +1047,7 @@ function rowToTransaction(row: Record<string, unknown>): Transaction {
     stepUpScore: row.step_up_score != null ? Number(row.step_up_score) : undefined,
     externalRef: row.external_ref ? (row.external_ref as string) : undefined,
     rail: row.rail ? (row.rail as string) : undefined,
+    kind: row.kind ? (row.kind as Transaction["kind"]) : undefined,
   };
 }
 
@@ -1584,6 +1675,9 @@ export async function listOutboxPage(opts: {
       createdAt: Number(r.created_at),
       deliveredAt: r.delivered_at ? Number(r.delivered_at) : undefined,
       attemptCount: Number(r.attempt_count),
+      ackedAt: r.acked_at ? Number(r.acked_at) : undefined,
+      ackedBy: r.acked_by ? (r.acked_by as string) : undefined,
+      ackNote: r.ack_note ? (r.ack_note as string) : undefined,
     }),
   });
 }
@@ -1827,6 +1921,7 @@ export async function createPolicyVersion(
   walletId: string,
   policy: WalletPolicy,
   createdBy: string,
+  approvalId?: string,
 ): Promise<PolicyVersion> {
   const s = getStore();
   await s.ready;
@@ -1842,7 +1937,7 @@ export async function createPolicyVersion(
     status: "PENDING",
   };
   await s.client.execute(
-    "INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')",
+    "INSERT INTO policy_versions (id, wallet_id, policy, policy_hash, created_by, effective_at, created_at, status, approval_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)",
     [
       version.id,
       walletId,
@@ -1851,6 +1946,7 @@ export async function createPolicyVersion(
       createdBy,
       version.effectiveAt,
       now,
+      approvalId ?? null,
     ],
   );
   s.events.emit("policy", version);
@@ -1916,6 +2012,12 @@ export async function promoteDuePolicies(now = Date.now()): Promise<number> {
   // Newest PENDING per wallet wins (last write per wallet_id).
   const newestByWallet = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
+    // Approval-gated versions only commit once their linked approval is
+    // APPROVED. Unapproved policy changes stay pending (do not promote).
+    if (row.approval_id) {
+      const approval = await getApproval(row.approval_id as string);
+      if (!approval || approval.status !== "APPROVED") continue;
+    }
     newestByWallet.set(row.wallet_id as string, row);
   }
 
@@ -1958,16 +2060,27 @@ export async function promoteDuePolicies(now = Date.now()): Promise<number> {
 
 /**
  * Records a policy change as a timelocked version. Returns the current
- * (still effective) wallet plus the pending version.
+ * (still effective) wallet plus the pending version. With `requireApproval`
+ * the change ALSO opens a 2-of-3 approval and only commits once signers
+ * approve and the timelock elapses.
  */
 export async function updatePolicy(
   id: string,
   partial: Partial<WalletPolicy>,
   createdBy = "owner",
-): Promise<{ wallet: Wallet; pending: PolicyVersion } | null> {
+  options?: { requireApproval?: boolean },
+): Promise<{ wallet: Wallet; pending: PolicyVersion; approval?: Approval } | null> {
   const wallet = await getWallet(id);
   if (!wallet) return null;
   const next: WalletPolicy = { ...wallet.policy, ...partial };
+  if (options?.requireApproval) {
+    const { version, approval } = await proposePolicyChangeApproval({
+      walletId: id,
+      policy: next,
+      createdBy,
+    });
+    return { wallet, pending: version, approval };
+  }
   const pending = await createPolicyVersion(id, next, createdBy);
   if (POLICY_TIMELOCK_MS === 0) {
     await promoteDuePolicies(Date.now() + 1);
@@ -2124,6 +2237,55 @@ export async function expireStepUps(now = Date.now()): Promise<string[]> {
     expired.push(id);
   }
   return expired;
+}
+
+/**
+ * On-call escalation: a STEP_UP_REQUIRED transfer that is within
+ * ESCALATION_GRACE_MS of its decision TTL triggers an escalation event
+ * (once per tx, deduped). If still undecided the transfer expires and is
+ * blocked — it is never silently approved.
+ */
+export async function escalateStepUps(now = Date.now()): Promise<string[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    'SELECT id, wallet_id, "to", amount, pending_until FROM transactions WHERE status = \'STEP_UP_REQUIRED\' AND pending_until IS NOT NULL',
+  );
+  const escalated: string[] = [];
+  for (const row of rows) {
+    const id = row.id as string;
+    const walletId = row.wallet_id as string;
+    const ttl = Number(row.pending_until);
+    if (ttl - now > ESCALATION_GRACE_MS) continue;
+
+    const recentlyEscalated = await s.client.execute(
+      `SELECT payload FROM outbox WHERE event_type = 'STEP_UP_ESCALATED' ORDER BY created_at DESC LIMIT 200`,
+    );
+    const seen = recentlyEscalated.rows.some((r) => {
+      try {
+        return JSON.parse(String(r.payload)).txId === id;
+      } catch {
+        return false;
+      }
+    });
+    if (seen) continue;
+
+    await recordOutbox(walletId, "STEP_UP_ESCALATED", {
+      txId: id,
+      amount: Number(row.amount),
+      to: String(row.to),
+      ttlMs: Math.max(0, ttl - now),
+      note: "High-risk transfer awaiting owner decision is within the escalation grace window",
+    });
+    await addAudit({
+      walletId,
+      actor: "system",
+      action: "STEP_UP_ESCALATED",
+      details: `Step-up for transfer ${id.slice(0, 8)} escalated; expires ${new Date(ttl).toISOString()} if undecided`,
+    });
+    escalated.push(id);
+  }
+  return escalated;
 }
 
 /**
@@ -2320,7 +2482,7 @@ export async function createTransaction(
   await appendLedgerRow(
     s.client,
     "transactions",
-    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref", "idempotency_key"],
+    ["id", "wallet_id", "from", "to", "amount", "amount_units", "purpose", "status", "rejection_reason", "requested_at", "pending_until", "settled_at", "blocked_at", "revoked_at", "nonce", "step_up_score", "external_ref", "idempotency_key", "kind"],
     [
       id,
       input.walletId,
@@ -2340,6 +2502,7 @@ export async function createTransaction(
       input.stepUpScore ?? null,
       input.externalRef ?? null,
       input.idempotencyKey ?? null,
+      input.kind ?? "transfer",
     ],
     txContent({
       walletId: input.walletId,
@@ -2606,6 +2769,7 @@ function rowToApproval(row: Record<string, unknown>): Approval {
     createdAt: Number(row.created_at),
     expiresAt: Number(row.expires_at),
     keyMinted: Number(row.key_minted) === 1,
+    payload: row.payload ? (row.payload as string) : undefined,
   };
 }
 
@@ -2684,6 +2848,7 @@ export async function proposeApproval(input: {
   label: string;
   proposer: string;
   required?: number;
+  payload?: string;
 }): Promise<Approval> {
   const s = getStore();
   await s.ready;
@@ -2699,10 +2864,11 @@ export async function proposeApproval(input: {
     createdAt: Date.now(),
     expiresAt: Date.now() + MULTISIG_TTL_MS,
     keyMinted: false,
+    payload: input.payload,
   };
   await s.client.execute(
-    `INSERT INTO approvals (id, operation, wallet_id, label, proposer, required, approvers, status, created_at, expires_at, key_minted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, 0)`,
+    `INSERT INTO approvals (id, operation, wallet_id, label, proposer, required, approvers, status, created_at, expires_at, key_minted, payload)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, 0, ?)`,
     [
       approval.id,
       approval.operation,
@@ -2713,6 +2879,7 @@ export async function proposeApproval(input: {
       JSON.stringify(approval.approvers),
       approval.createdAt,
       approval.expiresAt,
+      approval.payload ?? null,
     ],
   );
   await addAudit({
@@ -2761,6 +2928,24 @@ export async function approveApproval(
       "UPDATE approvals SET approvers = ?, status = 'PENDING' WHERE id = ?",
       [JSON.stringify(approvers), id],
     );
+    const updated = await getApproval(id);
+    return { approval: updated! };
+  }
+
+  // POLICY_CHANGE approvals never mint a key: the linked timelocked policy
+  // version commits through the normal promoteDuePolicies path (signers
+  // approve AND the timelock elapses).
+  if (approval.operation === "POLICY_CHANGE") {
+    await s.client.execute(
+      "UPDATE approvals SET approvers = ?, status = 'APPROVED' WHERE id = ?",
+      [JSON.stringify(approvers), id],
+    );
+    await addAudit({
+      walletId: approval.walletId,
+      actor: "system",
+      action: "MULTISIG_POLICY_APPROVED",
+      details: `Policy change '${approval.label}' approved ${approvers.length}-of-${approval.required}; commits when the timelock elapses`,
+    });
     const updated = await getApproval(id);
     return { approval: updated! };
   }
@@ -3458,4 +3643,494 @@ export async function agentReputation(walletId: string): Promise<AgentReputation
     totalSpent,
     lastActiveAt,
   };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Ops alerts: acknowledgement (threshold/budget alerts) — new-feature round 2
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Marks an outbox alert as acknowledged (who + note). The acknowledgement is
+ * itself audited, so the review trail shows both the alert and its resolution.
+ */
+export async function acknowledgeOutbox(
+  id: string,
+  actor: string,
+  note: string,
+): Promise<OutboxEntry | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM outbox WHERE id = ?",
+    [id],
+  );
+  const row = rows[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+  await s.client.execute(
+    "UPDATE outbox SET acked_at = ?, acked_by = ?, ack_note = ? WHERE id = ?",
+    [Date.now(), actor, note, id],
+  );
+  await addAudit({
+    walletId: row.wallet_id as string,
+    actor: "owner",
+    action: "ALERT_ACKNOWLEDGED",
+    details: `Acknowledged outbox alert ${id.slice(0, 8)} (${row.event_type as string}): ${note}`,
+  });
+  return {
+    id,
+    walletId: row.wallet_id as string,
+    eventType: row.event_type as string,
+    payload: row.payload as string,
+    createdAt: Number(row.created_at),
+    deliveredAt: row.delivered_at ? Number(row.delivered_at) : undefined,
+    attemptCount: Number(row.attempt_count),
+    ackedAt: Date.now(),
+    ackedBy: actor,
+    ackNote: note,
+  };
+}
+
+/**
+ * Emits a budget-threshold warning at 80%/100% of a daily/monthly/group limit.
+ * Deduped per (wallet, limitKind, threshold, day) so a runaway loop produces
+ * one alert per day, not one per transfer. No alert below 80%.
+ */
+export async function emitThresholdAlert(input: {
+  walletId: string;
+  limitKind: "daily" | "monthly" | "group";
+  threshold: "p80" | "p100";
+  limit: number;
+  spent: number;
+}): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  const day = new Date().toISOString().slice(0, 10);
+  const dedupeKey = `${input.walletId}:${input.limitKind}:${input.threshold}:${day}`;
+  const { rows } = await s.client.execute(
+    "SELECT payload FROM outbox WHERE event_type = 'BUDGET_THRESHOLD_WARNING' ORDER BY created_at DESC LIMIT 100",
+  );
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(r.payload as string) as { dedupeKey?: string };
+      if (p.dedupeKey === dedupeKey) return;
+    } catch {
+      /* ignore malformed payloads */
+    }
+  }
+  await recordOutbox(input.walletId, "BUDGET_THRESHOLD_WARNING", {
+    dedupeKey,
+    limitKind: input.limitKind,
+    threshold: input.threshold,
+    limit: input.limit,
+    spent: input.spent,
+    pct: Math.round((input.spent / input.limit) * 100),
+  });
+  await addAudit({
+    walletId: input.walletId,
+    actor: "system",
+    action: "BUDGET_THRESHOLD_WARNING",
+    details: `${input.limitKind} spend ${input.spent}/${input.limit} crossed ${input.threshold === "p80" ? "80%" : "100%"}`,
+  });
+}
+
+/**
+ * Emits one STRUCTURING_ALERT outbox event per flagged cluster, deduped by
+ * (wallet, beneficiary, day) so repeated scans don't spam the feed.
+ */
+export async function emitStructuringAlerts(
+  txs: Transaction[],
+  now = Date.now(),
+): Promise<number> {
+  const { detectStructuring } = await import("./structuring");
+  const flagged = detectStructuring(txs, now).filter((c) => c.flagged);
+  let emitted = 0;
+  for (const cluster of flagged) {
+    const key = `structuring:${cluster.walletId}:${cluster.to}:${cluster.date}`;
+    const existing = await listOutbox(cluster.walletId);
+    const already = existing.some((e) => {
+      try {
+        return (JSON.parse(e.payload) as { dedupeKey?: string }).dedupeKey === key;
+      } catch {
+        return false;
+      }
+    });
+    if (already) continue;
+    await recordOutbox(cluster.walletId, "STRUCTURING_ALERT", {
+      dedupeKey: key,
+      to: cluster.to,
+      date: cluster.date,
+      count: cluster.count,
+      totalUsd: cluster.totalUsd,
+      avgUsd: cluster.avgUsd,
+      jointThreshold: cluster.jointThreshold,
+      smallPaymentCap: cluster.smallPaymentCap,
+    });
+    await addAudit({
+      walletId: cluster.walletId,
+      actor: "system",
+      action: "STRUCTURING_ALERT",
+      details: `${cluster.count}× small payments to ${cluster.to} on ${cluster.date} total ${cluster.totalUsd} (> ${cluster.jointThreshold})`,
+    });
+    emitted += 1;
+  }
+  return emitted;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Recurring schedules (cron-lite) — new-feature round 2
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function createRecurringSchedule(input: {
+  walletId: string;
+  to: string;
+  amount: number;
+  purpose: string;
+  everyHours: number;
+  dailyHour?: number;
+}): Promise<RecurringSchedule> {
+  const s = getStore();
+  await s.ready;
+  const now = Date.now();
+  const schedule: RecurringSchedule = {
+    id: randomUUID(),
+    walletId: input.walletId,
+    to: input.to,
+    amount: input.amount,
+    purpose: input.purpose,
+    everyHours: input.everyHours,
+    dailyHour: input.dailyHour,
+    nextRunAt: input.dailyHour !== undefined ? nextDailyRun(input.dailyHour, now) : now + input.everyHours * 3600_000,
+    createdAt: now,
+    active: true,
+    runCount: 0,
+  };
+  await s.client.execute(
+    `INSERT INTO recurring_schedules (id, wallet_id, "to", amount, purpose, every_hours, daily_hour, next_run_at, created_at, active, run_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)`,
+    [
+      schedule.id,
+      schedule.walletId,
+      schedule.to,
+      schedule.amount,
+      schedule.purpose,
+      schedule.everyHours,
+      schedule.dailyHour ?? null,
+      schedule.nextRunAt,
+      now,
+    ],
+  );
+  await addAudit({
+    walletId: schedule.walletId,
+    actor: "owner",
+    action: "RECURRING_CREATED",
+    details: `Recurring ${schedule.amount} to ${schedule.to} every ${schedule.everyHours}h${schedule.dailyHour !== undefined ? ` daily at ${schedule.dailyHour}Z` : ""}`,
+  });
+  return schedule;
+}
+
+export async function listRecurringSchedules(walletId?: string): Promise<RecurringSchedule[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = walletId
+    ? await s.client.execute("SELECT * FROM recurring_schedules WHERE wallet_id = ? ORDER BY created_at DESC", [walletId])
+    : await s.client.execute("SELECT * FROM recurring_schedules ORDER BY created_at DESC");
+  return rows.map(rowToRecurringSchedule);
+}
+
+export async function getRecurringSchedule(id: string): Promise<RecurringSchedule | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute("SELECT * FROM recurring_schedules WHERE id = ?", [id]);
+  return rows[0] ? rowToRecurringSchedule(rows[0] as Record<string, unknown>) : null;
+}
+
+export async function deleteRecurringSchedule(id: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  const schedule = await getRecurringSchedule(id);
+  if (!schedule) return false;
+  await s.client.execute("DELETE FROM recurring_schedules WHERE id = ?", [id]);
+  await addAudit({
+    walletId: schedule.walletId,
+    actor: "owner",
+    action: "RECURRING_DELETED",
+    details: `Recurring schedule ${id.slice(0, 8)} deleted`,
+  });
+  return true;
+}
+
+function rowToRecurringSchedule(r: Record<string, unknown>): RecurringSchedule {
+  return {
+    id: r.id as string,
+    walletId: r.wallet_id as string,
+    to: r.to as string,
+    amount: Number(r.amount),
+    purpose: r.purpose as string,
+    everyHours: Number(r.every_hours),
+    dailyHour: r.daily_hour != null ? Number(r.daily_hour) : undefined,
+    nextRunAt: Number(r.next_run_at),
+    createdAt: Number(r.created_at),
+    active: Number(r.active) === 1,
+    lastRunAt: r.last_run_at ? Number(r.last_run_at) : undefined,
+    runCount: Number(r.run_count),
+  };
+}
+
+function nextDailyRun(hour: number, now: number): number {
+  const d = new Date(now);
+  d.setUTCHours(hour, 0, 0, 0);
+  if (d.getTime() <= now) d.setUTCDate(d.getUTCDate() + 1);
+  return d.getTime();
+}
+
+/** Advances a schedule's next_run_at and run bookkeeping after a run. */
+export async function advanceRecurringSchedule(id: string, now: number): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  const schedule = await getRecurringSchedule(id);
+  if (!schedule) return;
+  const next = schedule.dailyHour !== undefined
+    ? nextDailyRun(schedule.dailyHour, now)
+    : now + schedule.everyHours * 3600_000;
+  await s.client.execute(
+    "UPDATE recurring_schedules SET next_run_at = ?, last_run_at = ?, run_count = run_count + 1 WHERE id = ?",
+    [next, now, id],
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// WebAuthn / passkey credentials — new-feature round 2
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function saveWebauthnCredential(input: {
+  owner: string;
+  name: string;
+  credentialId: string;
+  publicKey: string;
+  counter: number;
+  transports?: string;
+}): Promise<WebauthnCredential> {
+  const s = getStore();
+  await s.ready;
+  const cred: WebauthnCredential = {
+    id: randomUUID(),
+    owner: input.owner.toLowerCase(),
+    name: input.name,
+    credentialId: input.credentialId,
+    publicKey: input.publicKey,
+    counter: input.counter,
+    transports: input.transports,
+    createdAt: Date.now(),
+  };
+  await s.client.execute(
+    `INSERT INTO webauthn_credentials (id, owner, name, credential_id, public_key, counter, transports, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [cred.id, cred.owner, cred.name, cred.credentialId, cred.publicKey, cred.counter, cred.transports ?? null, cred.createdAt],
+  );
+  return cred;
+}
+
+export async function listWebauthnCredentials(owner: string): Promise<WebauthnCredential[]> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM webauthn_credentials WHERE owner = ? ORDER BY created_at DESC",
+    [owner.toLowerCase()],
+  );
+  return rows.map((r) => ({
+    id: r.id as string,
+    owner: r.owner as string,
+    name: r.name as string,
+    credentialId: r.credential_id as string,
+    publicKey: r.public_key as string,
+    counter: Number(r.counter),
+    transports: r.transports ? (r.transports as string) : undefined,
+    createdAt: Number(r.created_at),
+  }));
+}
+
+export async function getWebauthnCredential(credentialId: string): Promise<WebauthnCredential | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM webauthn_credentials WHERE credential_id = ?",
+    [credentialId],
+  );
+  const r = rows[0] as Record<string, unknown> | undefined;
+  return r
+    ? {
+        id: r.id as string,
+        owner: r.owner as string,
+        name: r.name as string,
+        credentialId: r.credential_id as string,
+        publicKey: r.public_key as string,
+        counter: Number(r.counter),
+        transports: r.transports ? (r.transports as string) : undefined,
+        createdAt: Number(r.created_at),
+      }
+    : null;
+}
+
+export async function updateWebauthnCounter(credentialId: string, counter: number): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute(
+    "UPDATE webauthn_credentials SET counter = ? WHERE credential_id = ?",
+    [counter, credentialId],
+  );
+}
+
+export async function deleteWebauthnCredential(id: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT id FROM webauthn_credentials WHERE id = ?",
+    [id],
+  );
+  if (!rows[0]) return false;
+  await s.client.execute("DELETE FROM webauthn_credentials WHERE id = ?", [id]);
+  return true;
+}
+
+export async function saveWebauthnChallenge(input: {
+  challenge: string;
+  owner: string;
+  purpose: string;
+  txId?: string;
+}): Promise<void> {
+  const s = getStore();
+  await s.ready;
+  const now = Date.now();
+  await s.client.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", [now]);
+  await s.client.execute(
+    `INSERT INTO webauthn_challenges (challenge, owner, purpose, tx_id, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [input.challenge, input.owner.toLowerCase(), input.purpose, input.txId ?? null, now, now + 5 * 60_000],
+  );
+}
+
+export async function listWebauthnChallenges(
+  owner: string,
+  purpose?: string,
+): Promise<Array<{ challenge: string; owner: string; purpose: string; txId?: string; createdAt: number; expiresAt: number }>> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM webauthn_challenges WHERE owner = ?" +
+      (purpose ? " AND purpose = ?" : ""),
+    purpose ? [owner.toLowerCase(), purpose] : [owner.toLowerCase()],
+  );
+  return rows.map((r) => {
+    const row = r as Record<string, unknown>;
+    return {
+      challenge: row.challenge as string,
+      owner: row.owner as string,
+      purpose: row.purpose as string,
+      txId: row.tx_id ? (row.tx_id as string) : undefined,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+    };
+  });
+}
+
+export async function consumeWebauthnChallenge(
+  challenge: string,
+  owner: string,
+): Promise<{ purpose: string; txId?: string } | null> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM webauthn_challenges WHERE challenge = ? AND owner = ?",
+    [challenge, owner.toLowerCase()],
+  );
+  const row = rows[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+  if (Number(row.expires_at) < Date.now()) return null;
+  await s.client.execute("DELETE FROM webauthn_challenges WHERE challenge = ?", [challenge]);
+  return { purpose: row.purpose as string, txId: row.tx_id ? (row.tx_id as string) : undefined };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Policy-change approval workflow (2-of-3 on limit edits) — new-feature round 2
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Opens a policy change as BOTH a timelocked version AND a 2-of-3 approval.
+ * The change commits only when signers approve AND the timelock elapses —
+ * steal the owner key and you can propose, never impose.
+ */
+export async function proposePolicyChangeApproval(input: {
+  walletId: string;
+  policy: WalletPolicy;
+  createdBy: string;
+  label?: string;
+}): Promise<{ version: PolicyVersion; approval: Approval }> {
+  const version = await createPolicyVersion(input.walletId, input.policy, input.createdBy);
+  const approval = await proposeApproval({
+    operation: "POLICY_CHANGE",
+    walletId: input.walletId,
+    label: input.label ?? `Policy change ${version.policyHash.slice(0, 12)}`,
+    proposer: input.createdBy,
+    payload: version.id,
+  });
+  await s().client.execute(
+    "UPDATE policy_versions SET approval_id = ? WHERE id = ?",
+    [approval.id, version.id],
+  );
+  return { version, approval };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Saved searches (batch-ops convenience) — new-feature round 2
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function listSavedSearches(
+  owner: string,
+): Promise<Array<{ id: string; owner: string; name: string; filters: Record<string, unknown>; createdAt: number }>> {
+  const s = getStore();
+  await s.ready;
+  const { rows } = await s.client.execute(
+    "SELECT * FROM saved_searches WHERE owner = ? ORDER BY created_at DESC",
+    [owner.toLowerCase()],
+  );
+  return rows.map((r) => {
+    const row = r as Record<string, unknown>;
+    return {
+      id: row.id as string,
+      owner: row.owner as string,
+      name: row.name as string,
+      filters: JSON.parse(String(row.filters)) as Record<string, unknown>,
+      createdAt: Number(row.created_at),
+    };
+  });
+}
+
+export async function saveSearch(
+  owner: string,
+  name: string,
+  filters: Record<string, unknown>,
+): Promise<{ id: string; name: string; filters: Record<string, unknown>; createdAt: number }> {
+  const s = getStore();
+  await s.ready;
+  const id = `search:${randomUUID()}`;
+  const createdAt = Date.now();
+  await s.client.execute(
+    "INSERT INTO saved_searches (id, owner, name, filters, created_at) VALUES (?, ?, ?, ?, ?)",
+    [id, owner.toLowerCase(), name, JSON.stringify(filters), createdAt],
+  );
+  return { id, name, filters, createdAt };
+}
+
+export async function deleteSearch(id: string, owner: string): Promise<boolean> {
+  const s = getStore();
+  await s.ready;
+  await s.client.execute("DELETE FROM saved_searches WHERE id = ? AND owner = ?", [
+    id,
+    owner.toLowerCase(),
+  ]);
+  return true;
+}
+
+function s() {
+  return getStore();
 }

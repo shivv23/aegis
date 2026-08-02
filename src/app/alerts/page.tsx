@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, StatCard } from "@/components/ui";
-import { ownerApi } from "@/lib/api-client";
+import { ackAlert, ownerApi } from "@/lib/api-client";
 import { timeAgo } from "@/lib/utils";
-import { AlertTriangle, Bell, Check, Inbox, Info, Settings2, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Bell, Check, Inbox, Info, Settings2, ShieldAlert, X } from "lucide-react";
 import type { NotificationPrefs, NotifyChannel } from "@/core/notify";
 
 type Severity = "info" | "warning" | "critical";
@@ -27,6 +27,8 @@ interface OutboxEntry {
   createdAt: number;
   deliveredAt?: number;
   attemptCount: number;
+  ackedAt?: number;
+  ackSignature?: string;
 }
 
 function payloadOf(entry: OutboxEntry): Record<string, string> {
@@ -74,6 +76,31 @@ export default function AlertsPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [acking, setAcking] = useState<string | null>(null);
+
+  async function ack(entry: OutboxEntry) {
+    setAcking(entry.id);
+    try {
+      const res = await ackAlert(entry.id, "owner-view");
+      const updated = (res as { alert?: OutboxEntry }).alert;
+      setOutbox((prev) =>
+        prev.map((e) =>
+          e.id === entry.id
+            ? {
+                ...e,
+                ackedAt: updated?.ackedAt ?? Date.now(),
+                ackSignature: updated?.ackSignature ?? e.ackSignature,
+                deliveredAt: updated?.deliveredAt ?? e.deliveredAt,
+              }
+            : e,
+        ),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setAcking(null);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -270,6 +297,7 @@ export default function AlertsPage() {
                         {p.amount ? `${p.amount} → ${shortAddr(p.to ?? "")}` : ""}
                         {p.score ? ` · risk ${p.score}` : ""}
                         {e.deliveredAt ? " · delivered" : " · pending delivery"}
+                        {e.ackedAt ? " · acked" : ""}
                       </p>
                       {approve || decline ? (
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -286,7 +314,21 @@ export default function AlertsPage() {
                             </a>
                           ) : null}
                         </div>
-                      ) : null}
+                      ) : (
+                        <div className="mt-2">
+                          {e.ackedAt ? (
+                            <span className="font-mono text-[10px] text-emerald-400">
+                              acked {timeAgo(e.ackedAt)}
+                              {e.ackSignature ? ` · ${e.ackSignature.slice(0, 8)}…` : ""}
+                            </span>
+                          ) : (
+                            <Button variant="outline" size="sm" onClick={() => void ack(e)} disabled={acking === e.id}>
+                              {acking === e.id ? <Inbox className="h-3 w-3 animate-pulse" /> : <X className="h-3 w-3" />}
+                              Ack
+                            </Button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

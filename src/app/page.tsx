@@ -42,6 +42,39 @@ export default function CommandCenter() {
 
   const [busy, setBusy] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [globalKill, setGlobalKill] = useState<{
+    enabled: boolean;
+    reason: string;
+    setAt: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    ownerApi<{ global: { enabled: boolean; reason: string; setAt: number } }>(
+      "/api/admin/kill-switch",
+    )
+      .then((r) => {
+        if (active) setGlobalKill(r.global);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function toggleFleetKillSwitch() {
+    const enable = !globalKill?.enabled;
+    const reason = enable
+      ? window.prompt("Reason for engaging the fleet kill switch:", "Compromised agent fleet") ?? ""
+      : "";
+    if (enable && !reason) return;
+    await ownerApi("/api/admin/kill-switch", {
+      method: "POST",
+      body: JSON.stringify({ enabled: enable, reason }),
+    });
+    setGlobalKill({ enabled: enable, reason, setAt: Date.now() });
+    router.refresh();
+  }
 
   async function toggleFreeze(id: string, frozen: boolean) {
     await ownerApi(`/api/wallet/${id}/${frozen ? "unfreeze" : "freeze"}`, {
@@ -116,7 +149,13 @@ export default function CommandCenter() {
         <div className="xl:col-span-2 space-y-4">
           <GuardianPanel />
 
-          <Card className="flex items-center justify-between border-accent/30">
+          <Card
+            className={
+              globalKill?.enabled
+                ? "flex items-center justify-between border-danger/50"
+                : "flex items-center justify-between border-accent/30"
+            }
+          >
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/15 border border-accent/40">
                 <Siren className="h-5 w-5 text-accent" />
@@ -131,6 +170,48 @@ export default function CommandCenter() {
                 </div>
               </div>
             </div>
+          </Card>
+
+          <Card
+            className={
+              globalKill?.enabled
+                ? "border-danger/60"
+                : "border-border"
+            }
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-mono text-xs uppercase tracking-widest text-muted">
+                Fleet kill switch
+              </div>
+              <Button
+                variant={globalKill?.enabled ? "warn" : "danger"}
+                size="sm"
+                onClick={() => void toggleFleetKillSwitch()}
+              >
+                {globalKill?.enabled ? (
+                  <>
+                    <Zap className="h-3.5 w-3.5" /> Release fleet
+                  </>
+                ) : (
+                  <>
+                    <Snowflake className="h-3.5 w-3.5" /> Engage fleet
+                  </>
+                )}
+              </Button>
+            </div>
+            {globalKill?.enabled ? (
+              <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+                EVERY WALLET IN EVERY ORG IS FROZEN
+                <div className="mt-1 text-[10px] text-muted">
+                  {globalKill.reason} · since {new Date(globalKill.setAt).toISOString()}
+                </div>
+              </div>
+            ) : (
+              <div className="font-mono text-[11px] text-muted">
+                One switch to freeze the entire fleet across every org. Last line
+                of defense.
+              </div>
+            )}
           </Card>
 
           <div>

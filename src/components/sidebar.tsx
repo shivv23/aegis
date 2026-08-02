@@ -22,15 +22,19 @@ import {
   Network,
   ShieldAlert,
   Route,
+  Gauge,
+  Bomb,
 } from "lucide-react";
 
 const links = [
   { href: "/home", label: "Home", icon: Home },
   { href: "/", label: "Command Center", icon: LayoutDashboard },
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
+  { href: "/alerts", label: "Alerts", icon: ShieldCheck },
   { href: "/audit", label: "Audit Trail", icon: ScrollText },
   { href: "/explorer", label: "Settlement Explorer", icon: Route },
   { href: "/security", label: "Security Events", icon: ShieldAlert },
+  { href: "/chaos", label: "Chaos Lab", icon: Bomb },
   { href: "/webhooks", label: "Webhooks", icon: Webhook },
   { href: "/sessions", label: "Sessions", icon: KeyRound },
   { href: "/auth", label: "Sign In", icon: ShieldCheck },

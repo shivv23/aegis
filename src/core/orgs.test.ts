@@ -49,7 +49,7 @@ describe("multi-tenant orgs", () => {
 describe("org-scoped authorization", () => {
   it("round-trips orgId through signed owner keys", async () => {
     const org = await createOrg("Key Org");
-    const token = await signKey("*", "owner", undefined, org.id);
+    const token = await signKey("*", "owner", { orgId: org.id });
     const claims = await verifyKey(token);
     expect(claims?.orgId).toBe(org.id);
   });
@@ -60,14 +60,14 @@ describe("org-scoped authorization", () => {
 
   it("org owner can manage its own org but not another", async () => {
     const org = await createOrg("Auth Org");
-    const claims = await verifyKey(await signKey("*", "owner", undefined, org.id));
+    const claims = await verifyKey(await signKey("*", "owner", { orgId: org.id }));
     expect(authorizeOrg(claims, org.id).ok).toBe(true);
     expect(authorizeOrg(claims, "org-other").ok).toBe(false);
   });
 
   it("org owner cannot touch wallets in another org", async () => {
     const org = await createOrg("Isolation Org");
-    const claims = await verifyKey(await signKey("*", "owner", undefined, org.id));
+    const claims = await verifyKey(await signKey("*", "owner", { orgId: org.id }));
     expect(authorizeWalletOrg(claims, "org-other").ok).toBe(false);
     expect(authorizeWalletOrg(claims, org.id).ok).toBe(true);
     expect(authorizeWalletOrg(claims, undefined).ok).toBe(false);

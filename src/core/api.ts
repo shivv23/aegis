@@ -63,11 +63,15 @@ export async function authenticate(
  * Authorizes a request against a required scope. Agent keys are scoped to a
  * single wallet and may only ever reach the rail endpoints. Owner keys may
  * either be the master key ("*") or a per-wallet owner key.
+ *
+ * `action` optionally enforces per-key action scoping (least-privilege):
+ * a key minted with `actions: ["freeze"]` can only reach that action family.
  */
 export function authorize(
   claims: ScopedKeyClaims | null,
   required: Scope,
   walletId?: string,
+  action?: string,
 ): { ok: boolean; reason?: string } {
   if (!claims) {
     return { ok: false, reason: "Missing or invalid credentials" };
@@ -76,6 +80,12 @@ export function authorize(
     return {
       ok: false,
       reason: `Key has scope '${claims.scope}', requires '${required}'`,
+    };
+  }
+  if (action && claims.actions && !claims.actions.includes(action)) {
+    return {
+      ok: false,
+      reason: `Key is scoped to actions [${claims.actions.join(", ")}], not '${action}'`,
     };
   }
   if (walletId && claims.walletId !== walletId && claims.walletId !== "*") {

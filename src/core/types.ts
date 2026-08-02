@@ -139,6 +139,9 @@ export type TxStatus =
   | "REVOKED"
   | "STEP_UP_REQUIRED";
 
+/** What kind of money movement a ledger row is. */
+export type TxKind = "transfer" | "deposit" | "withdrawal";
+
 export type RejectionReason =
   | "WALLET_FROZEN"
   | "LIMIT_EXCEEDED"
@@ -178,6 +181,8 @@ export interface Transaction {
   stepUpScore?: number;
   externalRef?: string;
   rail?: string;
+  /** DEPOSIT/WITHDRAWAL are funding movements; default is "transfer". */
+  kind?: TxKind;
 }
 
 export type AuditActor = "agent" | "owner" | "system";
@@ -201,6 +206,12 @@ export interface ScopedKeyClaims {
   keyId?: string;
   /** Optional org scope: this key can only manage wallets in this org. */
   orgId?: string;
+  /** Optional per-key action families (e.g. "freeze", "policy", "audit").
+   *  A key WITHOUT actions is unrestricted for its scope; a key WITH
+   *  actions can only perform those actions. */
+  actions?: string[];
+  /** Issued-at + TTL: minted keys carry an absolute exp in the JWT. */
+  ttlMs?: number;
 }
 
 export interface TransferRequest {
@@ -257,6 +268,10 @@ export interface OutboxEntry {
   createdAt: number;
   deliveredAt?: number;
   attemptCount: number;
+  /** Threshold/budget alerts can be acknowledged (who + note), audited. */
+  ackedAt?: number;
+  ackedBy?: string;
+  ackNote?: string;
 }
 
 export interface LedgerProof {
@@ -293,7 +308,7 @@ export interface Signer {
 
 export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
 
-export type ApprovalOperation = "MINT_OWNER_KEY";
+export type ApprovalOperation = "MINT_OWNER_KEY" | "POLICY_CHANGE";
 
 export interface Approval {
   id: string;
@@ -307,6 +322,8 @@ export interface Approval {
   createdAt: number;
   expiresAt: number;
   keyMinted: boolean;
+  /** Opaque payload (e.g. a policy-version id for POLICY_CHANGE). */
+  payload?: string;
 }
 
 export interface WebhookEndpoint {
@@ -330,4 +347,38 @@ export interface WebhookDelivery {
   httpStatus?: number;
   attemptedAt: number;
   deliveredAt?: number;
+}
+
+/**
+ * A recurring transfer schedule. Each due run is re-evaluated by the guard
+ * at execution time — a policy tightened yesterday blocks today's run.
+ */
+export interface RecurringSchedule {
+  id: string;
+  walletId: string;
+  to: string;
+  amount: number;
+  purpose: string;
+  /** Repeat every N hours from creation (cron-lite). */
+  everyHours: number;
+  /** Optional daily UTC hour (0-23); when set the schedule fires once/day. */
+  dailyHour?: number;
+  nextRunAt: number;
+  createdAt: number;
+  active: boolean;
+  /** Nonce prefix so each run is a fresh, nonce-unique ledger row. */
+  lastRunAt?: number;
+  runCount: number;
+}
+
+/** A FIDO2/WebAuthn authenticator registered against an owner account. */
+export interface WebauthnCredential {
+  id: string;
+  owner: string;
+  name: string;
+  credentialId: string;
+  publicKey: string;
+  counter: number;
+  transports?: string;
+  createdAt: number;
 }

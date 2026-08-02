@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
   return json(
     {
       org,
-      orgOwnerKey: await signKey("*", "owner", undefined, org.id),
+      orgOwnerKey: await signKey("*", "owner", { orgId: org.id }),
       note: "orgOwnerKey can only manage wallets inside this organization.",
     },
     201,

@@ -2,6 +2,8 @@ import type { NextRequest } from "next/server";
 import { authenticate, authorizeRead, error, json } from "@/core/api";
 import { listBudgetGroups, listTransactions, settleDue } from "@/core/store";
 import { forecastAll } from "@/core/budget";
+import { detectStructuring } from "@/core/structuring";
+import { latencyPercentiles } from "@/core/timeline";
 
 export const runtime = "nodejs";
 
@@ -58,6 +60,26 @@ export async function GET(req: NextRequest) {
   byPurpose.sort((a, b) => b.usd - a.usd);
 
   const budgets = forecastAll(await listBudgetGroups(), txs, now);
+  const latency = latencyPercentiles(txs, now);
+  const structuring = detectStructuring(txs, now);
 
-  return json({ funnel, blockedReasons, dailySpend: days, byPurpose: byPurpose.slice(0, 8), budgets });
+  return json({
+    funnel,
+    blockedReasons,
+    dailySpend: days,
+    byPurpose: byPurpose.slice(0, 8),
+    budgets,
+    latency,
+    structuring: structuring.map((c) => ({
+      walletId: c.walletId,
+      to: c.to,
+      date: c.date,
+      count: c.count,
+      totalUsd: c.totalUsd,
+      avgUsd: c.avgUsd,
+      jointThreshold: c.jointThreshold,
+      smallPaymentCap: c.smallPaymentCap,
+      flagged: c.flagged,
+    })),
+  });
 }

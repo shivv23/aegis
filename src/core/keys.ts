@@ -7,19 +7,38 @@ const secret = new TextEncoder().encode(
 
 export const MASTER_WALLET_ID = "*";
 
-export function signKey(walletId: string, scope: Scope, keyId?: string, orgId?: string): Promise<string> {
+export interface SignKeyOptions {
+  keyId?: string;
+  orgId?: string;
+  /** Per-key action families (e.g. ["freeze"], ["policy", "audit"]).
+   *  Absent = unrestricted for the scope. */
+  actions?: string[];
+  /** Short TTL at mint time; the JWT exp is set accordingly. */
+  ttlMs?: number;
+}
+
+export function signKey(
+  walletId: string,
+  scope: Scope,
+  options?: SignKeyOptions,
+): Promise<string> {
   const claims: ScopedKeyClaims = {
     walletId,
     scope,
     role: scope === "owner" ? "wallet-owner" : scope === "auditor" ? "auditor" : "agent",
-    ...(keyId ? { keyId } : {}),
-    ...(orgId ? { orgId } : {}),
+    ...(options?.keyId ? { keyId: options.keyId } : {}),
+    ...(options?.orgId ? { orgId: options.orgId } : {}),
+    ...(options?.actions ? { actions: options.actions } : {}),
   };
-  return new SignJWT({ ...claims })
+  const builder = new SignJWT({ ...claims })
     .setProtectedHeader({ alg: "HS256" })
-    .setIssuer("aegis")
-    .setExpirationTime("365d")
-    .sign(secret);
+    .setIssuer("aegis");
+  if (options?.ttlMs) {
+    builder.setExpirationTime(`${Math.floor(options.ttlMs / 1000)}s`);
+  } else {
+    builder.setExpirationTime("365d");
+  }
+  return builder.sign(secret);
 }
 
 export async function verifyKey(
@@ -41,6 +60,9 @@ export async function verifyKey(
         role: payload.role as string,
         ...(typeof payload.keyId === "string" ? { keyId: payload.keyId } : {}),
         ...(typeof payload.orgId === "string" ? { orgId: payload.orgId } : {}),
+        ...(Array.isArray(payload.actions)
+          ? { actions: (payload.actions as unknown[]).filter((a): a is string => typeof a === "string") }
+          : {}),
       };
     }
     return null;

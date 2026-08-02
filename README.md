@@ -83,6 +83,17 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Push alert webhooks** | Wallet | every outbox event is POSTed to `AEGIS_WEBHOOK_URL` (HMAC-signed with `AEGIS_WEBHOOK_SECRET`) |
 | **What-if policy simulator** | Sim | replay a wallet's real history against a hypothetical policy and see every would-be block |
 | **On-chain mirror** | Chain | `Guardian.sol` runs the same checks; `PolicyRegistry.sol` seals the active policy hash (live on Sepolia, verified `matches: true`) |
+| **Batch payroll + recurring** | Rail | one CSV/row batch through the same guard; recurring schedules run on cron and re-check policy at execution time |
+| **Simulated funding rails** | Rail | deposit/withdraw credit & debit the same hash-chained ledger with bank-style refs, explicitly `simulated:true` — no real money moves |
+| **Signed export proof** | Export | every `audit.json` pack carries a deterministic Ed25519 signature + ledger head hash; anyone can verify offline with the published public key |
+| **Per-tx timeline + latency** | Ops | every hop (requested → hold → settled/blocked/revoked) from real stored timestamps, plus p50/p95 processing metrics |
+| **Structuring / smurfing detection** | Ops | flags clusters of many small same-beneficiary payments that jointly breach a cap (AML-lite alert, never a block) |
+| **Alert acknowledgement** | Ops | threshold/structuring alerts are acked with who + why, and the ack is itself audited |
+| **Step-up escalation** | Ops | undecided high-risk transfers within their grace window get a nudge event so they never silently expire |
+| **Hardware-key (WebAuthn) approval** | Keys | register a passkey from the wallet console; high-risk transfers can be approved with physical presence instead of a copied token |
+| **Scoped keys with actions + TTL** | Keys | minted keys can carry per-key action families (freeze/policy/audit) and an absolute expiry; a key with `actions` can only perform those |
+| **Saved searches** | Ops | persist transaction filters across sessions (`/api/searches`) |
+| **Chaos lab** | Ops | one-click load mix (valid / chaos / velocity) against the real rail with funnel + latency + breaker telemetry |
 
 ## Stack
 
@@ -96,7 +107,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 - **Ed25519 (node:crypto)** — agent keypairs sign every transfer request
 - **SHA-256 hash chain** — tamper-evident, append-only ledger
 - **SSE** — live transaction stream to the dashboard
-- **Vitest** — 268 tests across 38 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror, counterparties, budget groups, escrows, usage, multi-currency, export, key lifecycle, LLM classifier, and property-based fuzzing of the guard (fast-check)
+- **Vitest** — 299 tests across 40 suites incl. attack-resistance, signing, ledger, timelock, risk, step-up, breaker, simulator, rail, multi-sig, orgs, on-chain mirror, counterparties, budget groups, escrows, usage, multi-currency, export, key lifecycle, LLM classifier, round-2 (batches, recurring, funding, structuring, thresholds, passkeys, escalation, export proof, timeline), and property-based fuzzing of the guard (fast-check)
 - **Solidity (Hardhat)** — `contracts/`: on-chain `Guardian` (per-tx cap, allowlist, daily/velocity limits, one-way `revoke()`) + `PolicyRegistry` (seals the policy hash) — 10 Hardhat tests green; live on Sepolia
 
 ## Getting started
@@ -173,6 +184,12 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 |---|---|---|---|
 | `POST` | `/api/rail/transfer` | agent | Request a transfer. Guard decides. |
 | `GET` | `/api/rail/health` | agent/owner | Verify scoped identity |
+| `POST` | `/api/rail/batch` | agent | Batch transfers (rows or array) through the same guard |
+| `GET` | `/api/recurring` | owner | List recurring schedules |
+| `POST` | `/api/recurring` | owner | Create a recurring schedule (runs on cron, re-checked at execution) |
+| `POST` | `/api/cron/jobs` | system | Cron hook: runs due recurring payments |
+| `GET/POST` | `/api/fund` | owner | Simulated deposit: credits the ledger with a bank-style ref (`simulated:true`) |
+| `GET/POST` | `/api/withdraw` | owner | Simulated withdrawal: debits the ledger with a bank-style ref |
 
 ### Owner control plane
 | Method | Path | Purpose |
@@ -200,17 +217,25 @@ All endpoints require `Authorization: Bearer <key>`.### Agent rail — the only 
 | `GET` | `/api/transactions/stream` | SSE live feed |
 | `GET` | `/api/audit` | Audit trail |
 | `GET` | `/api/keys?walletId=` | Mint scoped owner/agent JWT keys + list agent keys (lifecycle); `?role=auditor` mints a read-only auditor key |
-| `POST` | `/api/keys/mint` | Mint an **Ed25519 agent keypair** (signed identity) |
+| `POST` | `/api/keys/mint` | Mint an **Ed25519 agent keypair** (signed identity); `?scope=` with `actions[]` (freeze/policy/audit) and `ttl` for action-scoped owner keys |
 | `POST` | `/api/keys/revoke` | Revoke an agent Ed25519 public key |
 | `POST` | `/api/keys/rotate` | Rotate: revoke old key + return a fresh keypair |
+| `POST` | `/api/keys/verify` | Verify an Ed25519 signature offline (public key + message + signature) |
+| `GET/POST` | `/api/passkey/register` | Begin / verify hardware-key (WebAuthn) registration |
+| `GET/POST` | `/api/passkey/assert` | Begin / verify hardware-key assertion for step-up approval |
+| `GET/POST` | `/api/searches` | List / save persisted transaction searches |
+| `DELETE` | `/api/searches/:id` | Delete a saved search |
 | `GET/POST` | `/api/counterparties` | List / upsert counterparty registry (BLOCKED stops transfers; sanctions hits auto-block) |
 | `GET/POST` | `/api/budget-groups` | List (`?walletId=` resolves group) / create cross-wallet budget groups |
 | `GET/POST/PATCH` | `/api/escrows` | List / create escrow / release or refund (`?id=&action=release\|refund`) |
 | `GET` | `/api/usage` | Usage metering: rows, totals, per-rail breakdown |
 | `GET` | `/api/currencies` | Supported display currencies |
-| `GET` | `/api/export` | Regulator pack: `?kind=audit.csv \| auditlog.csv \| audit.json \| report` |
+| `GET` | `/api/export` | Regulator pack: `?kind=audit.csv \| auditlog.csv \| audit.json \| report`; `audit.json` is signed (Ed25519) and `?kind=verify` checks the signature + ledger head |
 | `GET` | `/api/ledger/verify` | Prove the hash chain is intact |
 | `GET` | `/api/outbox` | Ops alert feed (guard decisions + wallet events) |
+| `POST` | `/api/outbox/:id/ack` | Acknowledge an alert with who + why (acked by owner/agent, audited) |
+| `GET` | `/api/transactions/:id/timeline` | Per-tx lifecycle hops from stored timestamps + latency percentiles |
+| `GET` | `/api/chaos` | Chaos-lab presets (valid / chaos / velocity mix) with funnel + latency + breaker telemetry |
 | `POST` | `/api/admin/reset` | Reset demo data (demo mode) |
 | `GET` | `/api/bootstrap` | Demo: hands the UI the master owner key |
 
@@ -347,6 +372,8 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_WEBHOOK_SECRET` | unset | HMAC secret for `X-AEGIS-Signature` on webhook payloads |
 | `AEGIS_LLM_URL` | unset | optional LLM endpoint for intent classification of `purpose` |
 | `AEGIS_LLM_MODEL` | `default` | model id sent to the LLM endpoint |
+| `AEGIS_ESCALATION_GRACE_MS` | `30000` | step-up window after which undecided transfers get an escalation nudge event |
+| `AEGIS_EXPORT_SIGNING_KEY` | generated | Ed25519 seed used to sign `audit.json` export packs; set a fixed value so prod signatures stay verifiable |
 
 The database is swappable via the adapter in `src/core/db.ts`. Set
 `AEGIS_DB_URL=postgres://user:pass@host:5432/db` and the ledger runs on

@@ -28,7 +28,7 @@ export async function GET() {
         id: s.id,
         name: s.name,
         role: s.role,
-        key: await signKey("*", "owner", s.id),
+        key: await signKey("*", "owner", { keyId: s.id }),
       })),
     ),
   });

@@ -48,6 +48,8 @@ next-env.d.ts
 /plan.md
 /newplan.md
 /SESSION.md
+/DEMO_SCRIPT.md
+/newFeatures.md
 
 # python sdk
 __pycache__/

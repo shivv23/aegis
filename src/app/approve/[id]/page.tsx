@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Button, Card, Money, TxBadge } from "@/components/ui";
 import { shortId } from "@/lib/utils";
-import { Check, ShieldAlert, X, Loader2 } from "lucide-react";
+import { Check, ShieldAlert, X, Loader2, Fingerprint } from "lucide-react";
 import type { Transaction } from "@/core/types";
 
 /**
@@ -27,6 +27,7 @@ export default function ApprovePage({
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ ok: boolean; message: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -78,6 +79,56 @@ export default function ApprovePage({
       setDone({ ok: false, message: "Network error. Please try again." });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function approveWithPasskey() {
+    setPasskeyBusy(true);
+    setError(null);
+    try {
+      const begin = await fetch("/api/passkey/assert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txId: id }),
+      });
+      const beginData = await begin.json().catch(() => ({}));
+      if (!begin.ok) {
+        setDone({
+          ok: false,
+          message:
+            (beginData as { error?: string }).error ??
+            "No owner key in this browser — use the Approve/Decline buttons instead.",
+        });
+        return;
+      }
+      const cred = await (navigator as any).credentials?.get({
+        publicKey: (beginData as { options?: unknown }).options,
+      });
+      if (!cred) {
+        setDone({ ok: false, message: "Passkey assertion cancelled." });
+        return;
+      }
+      const res = await fetch("/api/passkey/assert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txId: id, credential: cred }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDone({ ok: false, message: (data as { error?: string }).error ?? "Passkey approval failed." });
+      } else {
+        setDone({ ok: true, message: (data as { message?: string }).message ?? "Approved with hardware key." });
+        setTx((data as { transaction?: Transaction }).transaction ?? tx);
+      }
+    } catch {
+      setDone({
+        ok: false,
+        message: (navigator as any).credentials
+          ? "Passkey approval failed."
+          : "This browser doesn't support WebAuthn.",
+      });
+    } finally {
+      setPasskeyBusy(false);
     }
   }
 
@@ -174,6 +225,17 @@ export default function ApprovePage({
               </Button>
               <Button variant="danger" className="flex-1 py-3" onClick={() => decide("decline")} disabled={busy}>
                 <X className="h-4 w-4" /> Decline
+              </Button>
+            </div>
+            <div className="mt-3">
+              <Button
+                variant="outline"
+                className="w-full py-2.5"
+                onClick={() => void approveWithPasskey()}
+                disabled={passkeyBusy}
+              >
+                {passkeyBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Fingerprint className="h-4 w-4" />}
+                Approve with hardware key
               </Button>
             </div>
             <p className="mt-4 text-center text-[11px] text-muted">

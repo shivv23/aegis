@@ -162,3 +162,145 @@ export async function createWallet(input: {
     },
   );
 }
+
+// ── Round 2: batch, recurring, funding, chaos, searches, timeline ──────────
+
+export async function batchTransfer(
+  walletId: string,
+  transfers: Array<{ to: string; amount: number; purpose?: string }>,
+) {
+  return ownerApi<{
+    batchKey: string;
+    results: Array<{
+      index: number;
+      to: string;
+      amount: number;
+      status: string;
+      reason?: string;
+      details?: string;
+      txId?: string;
+    }>;
+    summary: {
+      total: number;
+      pending: number;
+      settled: number;
+      stepUp: number;
+      blocked: number;
+    };
+  }>("/api/rail/batch", {
+    method: "POST",
+    body: JSON.stringify({
+      walletId,
+      transfers,
+      idempotencyKey: `batch:${crypto.randomUUID()}`,
+    }),
+  });
+}
+
+export async function createRecurringSchedule(input: {
+  walletId: string;
+  to: string;
+  amount: number;
+  purpose?: string;
+  everyHours: number;
+  dailyHour?: number;
+}) {
+  return ownerApi<{ schedule: unknown }>("/api/rail/recurring", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listRecurringSchedulesApi(walletId?: string) {
+  const q = walletId ? `?walletId=${encodeURIComponent(walletId)}` : "";
+  return ownerApi<{ schedules: unknown[] }>(`/api/rail/recurring${q}`);
+}
+
+export async function deleteRecurringScheduleApi(id: string) {
+  return ownerApi<{ ok: boolean }>(`/api/rail/recurring/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function runRecurringNow() {
+  return ownerApi<{ ran: number; results: unknown[] }>("/api/rail/recurring/run", {
+    method: "POST",
+  });
+}
+
+export async function deposit(walletId: string, amount: number, method = "wire") {
+  return ownerApi<{ status: string; simulated: boolean; transaction: unknown; newBalance: number }>(
+    "/api/rail/fund",
+    { method: "POST", body: JSON.stringify({ walletId, amount, method }) },
+  );
+}
+
+export async function withdraw(
+  walletId: string,
+  amount: number,
+  destination: string,
+) {
+  return ownerApi<{ status: string; simulated: boolean; transaction: unknown; newBalance: number }>(
+    "/api/rail/withdraw",
+    { method: "POST", body: JSON.stringify({ walletId, amount, destination }) },
+  );
+}
+
+export async function runChaos(
+  walletId: string,
+  count: number,
+  mix: "valid" | "chaos" | "velocity",
+) {
+  return ownerApi<{
+    chaosKey: string;
+    mix: string;
+    count: number;
+    funnel: Record<string, number>;
+    latency: { p50: number; p95: number; max: number; avg: number };
+    breaker: { threshold: number; windowMs: number; anomalies: number; tripped: boolean };
+    results: Array<{ index: number; to: string; amount: number; status: string; reason?: string; latencyMs: number }>;
+  }>("/api/chaos", { method: "POST", body: JSON.stringify({ walletId, count, mix }) });
+}
+
+export async function fetchTimeline(txId: string) {
+  return ownerApi<{ transaction: unknown; timeline: unknown[] }>(
+    `/api/transactions/${encodeURIComponent(txId)}/timeline`,
+  );
+}
+
+export async function ackAlert(id: string, note: string) {
+  return ownerApi<{ acknowledged: boolean; alert: unknown }>(
+    `/api/outbox/${encodeURIComponent(id)}/ack`,
+    { method: "POST", body: JSON.stringify({ note }) },
+  );
+}
+
+export async function listSavedSearchesApi() {
+  return ownerApi<{ searches: Array<{ id: string; name: string; filters: Record<string, unknown>; createdAt: number }> }>(
+    "/api/searches",
+  );
+}
+
+export async function saveSearchApi(name: string, filters: Record<string, unknown>) {
+  return ownerApi<{ search: { id: string; name: string; filters: Record<string, unknown> } }>(
+    "/api/searches",
+    { method: "POST", body: JSON.stringify({ name, filters }) },
+  );
+}
+
+export async function deleteSearchApi(id: string) {
+  return ownerApi<{ ok: boolean }>(`/api/searches?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function mintScopedKey(input: {
+  walletId: string;
+  actions?: string[];
+  ttlMs?: number;
+}) {
+  return ownerApi<{ key: string; scope: string; actions?: string[]; ttlMs?: number }>(
+    "/api/keys",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}

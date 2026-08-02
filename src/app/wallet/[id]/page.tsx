@@ -14,8 +14,8 @@ import {
 import { LiveFeed } from "@/components/live-feed";
 import { SimulatorConsole } from "@/components/simulator-console";
 import { KeyLifecycle } from "@/components/key-lifecycle";
-import { mintKeys, ownerApi } from "@/lib/api-client";
-import { clock, shortId } from "@/lib/utils";
+import { deposit, mintKeys, ownerApi, withdraw } from "@/lib/api-client";
+import { clock, money, shortId } from "@/lib/utils";
 import {
   Snowflake,
   Zap,
@@ -25,8 +25,12 @@ import {
   Check,
   PauseCircle,
   X,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Fingerprint,
+  Loader2,
 } from "lucide-react";
-import type { AuditLogEntry, Transaction } from "@/core/types";
+import type { AuditLogEntry, Transaction, Wallet } from "@/core/types";
 
 export default function WalletDetail({
   params,
@@ -66,6 +70,21 @@ export default function WalletDetail({
   const [velocity, setVelocity] = useState("");
   const [allowlist, setAllowlist] = useState("");
   const [newAddr, setNewAddr] = useState("");
+  const [requireApproval, setRequireApproval] = useState(false);
+  const [policyNote, setPolicyNote] = useState<string | null>(null);
+
+  // ---- funding ----
+  const [depositAmount, setDepositAmount] = useState("1000");
+  const [depositMethod, setDepositMethod] = useState("wire");
+  const [withdrawAmount, setWithdrawAmount] = useState("100");
+  const [destination, setDestination] = useState("bank:acct-1234");
+  const [fundBusy, setFundBusy] = useState(false);
+  const [fundNote, setFundNote] = useState<string | null>(null);
+
+  // ---- passkey ----
+  const [passkeyName, setPasskeyName] = useState("agent-passkey");
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeyNote, setPasskeyNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (wallet && !editing) {
@@ -84,7 +103,12 @@ export default function WalletDetail({
   }
 
   async function savePolicy() {
-    await ownerApi(`/api/wallet/${id}`, {
+    const res = await ownerApi<{
+      wallet: Wallet;
+      requiresApproval?: boolean;
+      approval?: { id: string };
+      note?: string;
+    }>(`/api/wallet/${id}`, {
       method: "PATCH",
       body: JSON.stringify({
         maxPerTx: Number(maxPerTx),
@@ -95,9 +119,17 @@ export default function WalletDetail({
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        requireApproval,
       }),
     });
     setEditing(false);
+    if (res.requiresApproval) {
+      setPolicyNote(
+        `Policy change submitted for 2-of-3 signer approval (${res.approval?.id}). It will NOT apply until signers approve AND the timelock elapses.`,
+      );
+    } else {
+      setPolicyNote(null);
+    }
   }
 
   async function addAllowlist() {
@@ -139,6 +171,64 @@ export default function WalletDetail({
     await navigator.clipboard.writeText(text);
     setCopied(text);
     setTimeout(() => setCopied(null), 1500);
+  }
+
+  async function doDeposit() {
+    setFundBusy(true);
+    setFundNote(null);
+    try {
+      const res = await deposit(id, Number(depositAmount), depositMethod as "wire" | "ach" | "card");
+      setFundNote(
+        `Deposit settled (simulated). New balance ${money(res.newBalance)}. Tx ${shortId(String((res.transaction as { id?: string })?.id ?? ""), 10)}.`,
+      );
+    } catch (e) {
+      setFundNote(`Error: ${e instanceof Error ? e.message : "deposit failed"}`);
+    } finally {
+      setFundBusy(false);
+    }
+  }
+
+  async function doWithdraw() {
+    setFundBusy(true);
+    setFundNote(null);
+    try {
+      const res = await withdraw(id, Number(withdrawAmount), destination);
+      setFundNote(
+        `Withdrawal settled (simulated). New balance ${money(res.newBalance)}. Tx ${shortId(String((res.transaction as { id?: string })?.id ?? ""), 10)}.`,
+      );
+    } catch (e) {
+      setFundNote(`Error: ${e instanceof Error ? e.message : "withdrawal failed"}`);
+    } finally {
+      setFundBusy(false);
+    }
+  }
+
+  async function registerPasskey() {
+    setPasskeyBusy(true);
+    setPasskeyNote(null);
+    try {
+      const begin = await ownerApi<{ options: unknown }>("/api/passkey/register", {
+        method: "POST",
+      });
+      const cred = await (navigator as any).credentials?.create({ publicKey: begin.options });
+      if (!cred) {
+        setPasskeyNote("Passkey registration cancelled.");
+        return;
+      }
+      await ownerApi("/api/passkey/register", {
+        method: "POST",
+        body: JSON.stringify({ verify: true, name: passkeyName || "agent-passkey", credential: cred }),
+      });
+      setPasskeyNote("Passkey registered. The next step-up can be approved with this authenticator.");
+    } catch (e) {
+      setPasskeyNote(
+        (navigator as any).credentials
+          ? `Error: ${e instanceof Error ? e.message : "registration failed"}`
+          : "This browser doesn't support WebAuthn.",
+      );
+    } finally {
+      setPasskeyBusy(false);
+    }
   }
 
   if (!wallet) {
@@ -229,6 +319,24 @@ export default function WalletDetail({
               <Field label="Monthly limit ($)" type="number" value={monthlyLimit} readOnly={!editing} onChange={(e) => setMonthlyLimit(e.target.value)} />
               <Field label="Velocity (tx/min)" type="number" value={velocity} readOnly={!editing} onChange={(e) => setVelocity(e.target.value)} />
             </div>
+
+            {editing ? (
+              <label className="mt-3 flex cursor-pointer items-center gap-2 font-mono text-[11px] text-muted">
+                <input
+                  type="checkbox"
+                  checked={requireApproval}
+                  onChange={(e) => setRequireApproval(e.target.checked)}
+                  className="h-3.5 w-3.5 cursor-pointer accent-accent"
+                />
+                Require 2-of-3 signer approval for this change (never impose — propose)
+              </label>
+            ) : null}
+
+            {policyNote ? (
+              <div className="mt-3 rounded-md border border-orange-400/40 bg-orange-400/10 px-3 py-2 font-mono text-[11px] text-orange-300">
+                {policyNote}
+              </div>
+            ) : null}
 
             <div className="mt-4">
               <div className="mb-2 text-[11px] font-mono uppercase tracking-widest text-muted">
@@ -352,6 +460,74 @@ export default function WalletDetail({
         </div>
 
         <div className="space-y-6">
+          <Card>
+            <div className="flex items-center gap-2 mb-4">
+              <ArrowDownToLine className="h-4 w-4 text-accent" />
+              <span className="font-mono text-xs uppercase tracking-widest text-muted">
+                Funding &amp; withdrawals (simulated)
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+              <Field label="Deposit amount" type="number" value={depositAmount} onChange={(e) => setDepositAmount(e.target.value)} />
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-mono uppercase tracking-widest text-muted">Method</span>
+                <select
+                  value={depositMethod}
+                  onChange={(e) => setDepositMethod(e.target.value)}
+                  className="rounded-md border border-border bg-black/40 px-3 py-2 text-sm text-foreground outline-none focus:border-accent/60 font-mono"
+                >
+                  <option value="wire">wire</option>
+                  <option value="ach">ach</option>
+                  <option value="card">card</option>
+                </select>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => void doDeposit()} disabled={fundBusy}>
+                <ArrowDownToLine className="h-3.5 w-3.5" /> Deposit
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => void doWithdraw()} disabled={fundBusy}>
+                <ArrowUpFromLine className="h-3.5 w-3.5" /> Withdraw
+              </Button>
+            </div>
+            <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+              <Field label="Withdraw amount" type="number" value={withdrawAmount} onChange={(e) => setWithdrawAmount(e.target.value)} />
+              <Field label="Destination" value={destination} onChange={(e) => setDestination(e.target.value)} />
+            </div>
+            {fundNote ? (
+              <div className="mt-3 rounded-md border border-border bg-black/30 px-3 py-2 font-mono text-[11px] text-muted">
+                {fundNote}
+              </div>
+            ) : null}
+            <p className="mt-3 text-[11px] text-muted">
+              Simulated rails — no real money moves. Deposits credit and withdrawals
+              debit this wallet on the same hash-chained ledger.
+            </p>
+          </Card>
+
+          <Card>
+            <div className="flex items-center gap-2 mb-4">
+              <Fingerprint className="h-4 w-4 text-info" />
+              <span className="font-mono text-xs uppercase tracking-widest text-muted">
+                Hardware key (WebAuthn) step-up
+              </span>
+            </div>
+            <div className="flex gap-3 items-end">
+              <Field label="Passkey name" value={passkeyName} onChange={(e) => setPasskeyName(e.target.value)} className="flex-1" />
+              <Button variant="outline" size="sm" onClick={() => void registerPasskey()} disabled={passkeyBusy}>
+                {passkeyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Fingerprint className="h-3.5 w-3.5" />}
+                Register passkey
+              </Button>
+            </div>
+            {passkeyNote ? (
+              <div className="mt-3 rounded-md border border-border bg-black/30 px-3 py-2 font-mono text-[11px] text-muted">
+                {passkeyNote}
+              </div>
+            ) : null}
+            <p className="mt-3 text-[11px] text-muted">
+              Physical presence, not a copied bearer token. On a high-risk transfer
+              you approve with this key from the decision page.
+            </p>
+          </Card>
+
           <SimulatorConsole walletId={wallet.id} agentKey={keys?.agentKey ?? null} frozen={frozen} />
 
           {awaitingApproval.length > 0 ? (
