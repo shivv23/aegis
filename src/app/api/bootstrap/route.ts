@@ -20,7 +20,8 @@ export async function GET() {
   const signers = await ensureDefaultSigners();
   return json({
     ownerKey: await masterOwnerKey(),
-    seedWalletId: SEED_WALLET_ID,
+    // Only reported when the opt-in demo seed actually provisioned the wallet.
+    seedWalletId: wallet ? SEED_WALLET_ID : null,
     seeded: Boolean(wallet),
     signers: await Promise.all(
       signers.map(async (s) => ({

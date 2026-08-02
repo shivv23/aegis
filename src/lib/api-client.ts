@@ -6,7 +6,7 @@ const OWNER_KEY = "aegis-owner-key";
 
 export interface Bootstrap {
   ownerKey: string;
-  seedWalletId: string;
+  seedWalletId: string | null;
   seeded: boolean;
   signers: Array<{ id: string; name: string; role: string; key: string }>;
 }
