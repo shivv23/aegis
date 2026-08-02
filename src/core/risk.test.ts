@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CRITICAL_THRESHOLD,
   STEP_UP_THRESHOLD,
+  adjustScore,
   riskLevel,
   scoreTransfer,
 } from "@/core/risk";
@@ -166,5 +167,25 @@ describe("risk engine", () => {
     expect(riskLevel(84)).toBe("HIGH");
     expect(riskLevel(85)).toBe("CRITICAL");
     expect(riskLevel(100)).toBe("CRITICAL");
+  });
+
+  it("adjustScore attaches a factor and re-scores without mutation", () => {
+    const base = scoreTransfer({
+      wallet,
+      amount: 40,
+      to: KNOWN_PAYEE,
+      purpose: "gpu burst",
+      history: history(noon, 0),
+      now: noon,
+    });
+    const before = base.score;
+    const adjusted = adjustScore(base, {
+      name: "intent_anomaly",
+      points: 15,
+      reason: "LLM disagrees with claimed intent",
+    });
+    expect(adjusted.score).toBe(before + 15);
+    expect(adjusted.factors.some((f) => f.name === "intent_anomaly")).toBe(true);
+    expect(base.factors.some((f) => f.name === "intent_anomaly")).toBe(false);
   });
 });

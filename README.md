@@ -79,7 +79,7 @@ Agent (scoped key)  ──▶  POST /api/rail/transfer  ──▶  POLICY GUARD 
 | **Multi-currency display** | Ledger | render any balance/amount in USD, USDC, EUR, INR, or ETH (single-unit ledger truth) |
 | **Regulator export** | Export | one-click audit pack (`audit.csv`, `auditlog.csv`, `audit.json`) + a SAR-lite monthly report flagging counterparty anomalies |
 | **Agent key lifecycle** | Keys | list, rotate, revoke, expire, and ACL agent keys — a rotated key dies the moment the owner rotates it |
-| **LLM intent classifier** | Rail | optional (`AEGIS_LLM_URL`) classification of the `purpose` field; deterministic heuristic fallback, never gates a transfer |
+| **LLM intent classifier** | Rail | optional (`AEGIS_LLM_URL` + `AEGIS_LLM_KEY`) classification of the `purpose` field; when the LLM's intent contradicts the claimed intent, risk is bumped (`intent_anomaly`) and an `INTENT_ANOMALY` audit row is written — deterministic heuristic fallback, never gates a transfer on its own |
 | **Push alert webhooks** | Wallet | every outbox event is POSTed to `AEGIS_WEBHOOK_URL` (HMAC-signed with `AEGIS_WEBHOOK_SECRET`) |
 | **What-if policy simulator** | Sim | replay a wallet's real history against a hypothetical policy and see every would-be block |
 | **On-chain mirror** | Chain | `Guardian.sol` runs the same checks; `PolicyRegistry.sol` seals the active policy hash (live on Sepolia, verified `matches: true`) |
@@ -370,8 +370,9 @@ scripts/agent-sim.ts  # standalone CLI agent (signed or JWT) that attacks the re
 | `AEGIS_ETHERSCAN_KEY` | unset | optional; enables contract verification on Sepolia |
 | `AEGIS_WEBHOOK_URL` | unset | ops push-alert webhook: every outbox event is POSTed here |
 | `AEGIS_WEBHOOK_SECRET` | unset | HMAC secret for `X-AEGIS-Signature` on webhook payloads |
-| `AEGIS_LLM_URL` | unset | optional LLM endpoint for intent classification of `purpose` |
-| `AEGIS_LLM_MODEL` | `default` | model id sent to the LLM endpoint |
+| `AEGIS_LLM_URL` | unset | optional LLM endpoint for intent classification of `purpose` (OpenAI chat/completions dialect — works with OpenAI, Orca Router, OpenRouter) |
+| `AEGIS_LLM_KEY` | unset | bearer key sent to `AEGIS_LLM_URL`; without it the request goes out unauthenticated |
+| `AEGIS_LLM_MODEL` | `orcarouter/auto` | model id sent to the LLM endpoint |
 | `AEGIS_ESCALATION_GRACE_MS` | `30000` | step-up window after which undecided transfers get an escalation nudge event |
 | `AEGIS_EXPORT_SIGNING_KEY` | generated | Ed25519 seed used to sign `audit.json` export packs; set a fixed value so prod signatures stay verifiable |
 

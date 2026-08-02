@@ -124,3 +124,14 @@ export function scoreTransfer(input: RiskInput): RiskVerdict {
   const score = round(Math.min(100, factors.reduce((sum, f) => sum + f.points, 0)));
   return { score, level: riskLevel(score), factors };
 }
+
+/**
+ * Re-scores a verdict after an extra factor is attached (e.g. an LLM intent
+ * anomaly found after the base score). Keeps the pure contract: same inputs,
+ * same score.
+ */
+export function adjustScore(verdict: RiskVerdict, factor: RiskFactor): RiskVerdict {
+  const factors = [...verdict.factors, factor];
+  const score = round(Math.min(100, factors.reduce((sum, f) => sum + f.points, 0)));
+  return { score, level: riskLevel(score), factors };
+}

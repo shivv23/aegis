@@ -26,7 +26,8 @@ import {
   resolveEffectiveWallet,
   settleDue,
 } from "./store";
-import { CRITICAL_THRESHOLD, scoreTransfer, STEP_UP_THRESHOLD } from "./risk";
+import { CRITICAL_THRESHOLD, adjustScore, scoreTransfer, STEP_UP_THRESHOLD } from "./risk";
+import { classifyHeuristic, classifyWithLLM } from "./classify";
 import { decisionLink } from "./approval-links";
 import type { TxKind } from "./types";
 
@@ -162,8 +163,33 @@ export async function runTransfer(input: {
     };
   }
 
-  // Hard guard passed — now score the transfer for risk.
-  const risk = scoreTransfer({ wallet, amount, to, purpose, history, now });
+  // Hard guard passed — now score the transfer for risk. When an LLM is
+  // configured (AEGIS_LLM_URL), the purpose is classified independently and a
+  // mismatch with the claimed intent bumps the score. Optional: without an
+  // endpoint the deterministic heuristic path behaves exactly as before.
+  let risk = scoreTransfer({ wallet, amount, to, purpose, history, now });
+
+  const llmEndpoint = process.env.AEGIS_LLM_URL;
+  if (llmEndpoint) {
+    const llmVerdict = await classifyWithLLM(purpose, llmEndpoint);
+    if (llmVerdict && llmVerdict.category !== "unknown") {
+      const claimed = classifyHeuristic(purpose).category;
+      const mismatch = claimed !== "unknown" && claimed !== llmVerdict.category;
+      if (mismatch) {
+        risk = adjustScore(risk, {
+          name: "intent_anomaly",
+          points: 15,
+          reason: `LLM classified purpose "${purpose}" as ${llmVerdict.category}, but the claimed intent is ${claimed}`,
+        });
+        await addAudit({
+          walletId: wallet.id,
+          actor: "system",
+          action: "INTENT_ANOMALY",
+          details: `Purpose "${purpose}" classified ${claimed} (claimed) vs ${llmVerdict.category} (LLM) — risk bumped +15`,
+        });
+      }
+    }
+  }
 
   if (risk.level === "CRITICAL") {
     const tx = await createTransaction({

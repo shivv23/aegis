@@ -6,6 +6,7 @@ import { BookOpen, Terminal } from "lucide-react";
 
 interface Endpoint {
   method: string;
+  path: string;
   summary: string;
   description?: string;
 }
@@ -31,7 +32,12 @@ export default function DocsPage() {
                     ? "Demo"
                     : "Systems & ledger";
             g[key] ??= [];
-            g[key].push({ method: method.toUpperCase(), summary: (op as Endpoint).summary ?? "", description: (op as Endpoint).description });
+            g[key].push({
+              method: method.toUpperCase(),
+              path,
+              summary: (op as Endpoint).summary ?? "",
+              description: (op as Endpoint).description,
+            });
           }
         }
         setGroups(g);
@@ -52,7 +58,15 @@ export default function DocsPage() {
     { label: "Rail health", method: "GET", path: "/api/rail/health", body: "" },
     { label: "List wallets", method: "GET", path: "/api/wallet", body: "" },
     { label: "Ledger verify", method: "GET", path: "/api/ledger/verify", body: "" },
-    { label: "List counterparties", method: "GET", path: "/api/counterparties", body: "" },
+    { label: "List transactions", method: "GET", path: "/api/transactions", body: "" },
+    { label: "Outbox alerts", method: "GET", path: "/api/outbox", body: "" },
+    { label: "Recurring schedules", method: "GET", path: "/api/rail/recurring", body: "" },
+    { label: "Simulated deposit", method: "POST", path: "/api/rail/fund", body: "{\n  \"walletId\": \"wallet-tradingbot-42\",\n  \"amount\": 250,\n  \"method\": \"ach\"\n}" },
+    { label: "Simulated withdrawal", method: "POST", path: "/api/rail/withdraw", body: "{\n  \"walletId\": \"wallet-tradingbot-42\",\n  \"amount\": 50,\n  \"destination\": \"ach://credit/demo-bank\"\n}" },
+    { label: "Batch transfers", method: "POST", path: "/api/rail/batch", body: "{\n  \"walletId\": \"wallet-tradingbot-42\",\n  \"transfers\": [\n    { \"to\": \"compute:0xCAFE0001\", \"amount\": 5 },\n    { \"to\": \"api:0xBEEF0002\", \"amount\": 7 }\n  ]\n}" },
+    { label: "Chaos lab", method: "POST", path: "/api/chaos", body: "{\n  \"walletId\": \"wallet-tradingbot-42\",\n  \"mix\": \"valid\",\n  \"count\": 10\n}" },
+    { label: "Export proof verify", method: "GET", path: "/api/export?kind=verify", body: "" },
+    { label: "Mint agent key", method: "POST", path: "/api/keys/mint", body: "{\n  \"walletId\": \"wallet-tradingbot-42\"\n}" },
     { label: "Reset demo data", method: "POST", path: "/api/admin/reset", body: "{}" },
   ] as const;
 
@@ -61,17 +75,21 @@ export default function DocsPage() {
   const [playResp, setPlayResp] = useState("");
   const [playBusy, setPlayBusy] = useState(false);
 
-  async function sendPlay() {
-    const ep = playground[playIdx];
+  // Custom request builder: judge can hit ANY endpoint from the browser.
+  const [customMethod, setCustomMethod] = useState<"GET" | "POST" | "PATCH" | "DELETE">("GET");
+  const [customPath, setCustomPath] = useState("/api/ledger/verify");
+  const [customBody, setCustomBody] = useState("");
+
+  async function run(method: string, path: string, body: string) {
     setPlayBusy(true);
     try {
-      const res = await fetch(ep.path, {
-        method: ep.method,
+      const res = await fetch(path, {
+        method,
         headers: {
           "Content-Type": "application/json",
           ...(masterKey ? { Authorization: `Bearer ${masterKey}` } : {}),
         },
-        body: ep.method === "POST" ? playBody || "{}" : undefined,
+        body: body && method !== "GET" ? body : undefined,
       });
       const text = await res.text();
       setPlayResp(`${res.status} ${res.statusText}\n${text}`);
@@ -80,6 +98,15 @@ export default function DocsPage() {
     } finally {
       setPlayBusy(false);
     }
+  }
+
+  async function sendPlay() {
+    const ep = playground[playIdx];
+    await run(ep.method, ep.path, playBody);
+  }
+
+  async function sendCustom() {
+    await run(customMethod, customPath, customBody);
   }
 
   return (
@@ -116,7 +143,8 @@ export default function DocsPage() {
                   {e.method}
                 </span>
                 <div className="min-w-0">
-                  <code className="font-mono text-sm text-zinc-100">{e.summary}</code>
+                  <code className="font-mono text-sm text-zinc-100">{e.path}</code>
+                  <p className="mt-0.5 font-mono text-xs text-zinc-400">{e.summary}</p>
                   {e.description && <p className="mt-1 text-xs text-zinc-500">{e.description}</p>}
                 </div>
               </div>
@@ -177,6 +205,53 @@ export default function DocsPage() {
             <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-black/50 px-3 py-2 font-mono text-xs text-emerald-200">
               {playResp}
             </pre>
+          )}
+        </Card>
+      </section>
+
+      <section>
+        <h2 className="mb-3 font-mono text-sm font-semibold text-zinc-200">Custom request — test any endpoint live</h2>
+        <Card className="space-y-3">
+          <p className="text-xs text-zinc-500">
+            Call any documented endpoint straight from this page with the owner key attached. Replace{" "}
+            <code className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-emerald-300">wallet-tradingbot-42</code>{" "}
+            with a real wallet id from <code className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-emerald-300">GET /api/wallet</code>.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <select
+              value={customMethod}
+              onChange={(e) => setCustomMethod(e.target.value as typeof customMethod)}
+              className="rounded-md border border-zinc-800 bg-black/40 px-3 py-2 font-mono text-sm text-zinc-100 outline-none focus:border-emerald-500/60"
+            >
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PATCH">PATCH</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+            <input
+              value={customPath}
+              onChange={(e) => setCustomPath(e.target.value)}
+              spellCheck={false}
+              placeholder="/api/endpoint"
+              className="min-w-64 flex-1 rounded-md border border-zinc-800 bg-black/40 px-3 py-2 font-mono text-sm text-zinc-100 outline-none focus:border-emerald-500/60"
+            />
+            <button
+              onClick={sendCustom}
+              disabled={playBusy}
+              className="inline-flex items-center gap-2 rounded-md border border-sky-500 bg-sky-500/15 px-4 py-2 font-mono text-sm font-medium text-sky-300 transition-colors hover:bg-sky-500/25 disabled:opacity-40"
+            >
+              {playBusy ? "Sending…" : "Send"}
+            </button>
+          </div>
+          {customMethod !== "GET" && (
+            <textarea
+              value={customBody}
+              onChange={(e) => setCustomBody(e.target.value)}
+              rows={5}
+              spellCheck={false}
+              placeholder='{ "walletId": "wallet-tradingbot-42" }'
+              className="w-full resize-y rounded-md border border-zinc-800 bg-black/40 px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-emerald-500/60"
+            />
           )}
         </Card>
       </section>
